@@ -2207,7 +2207,12 @@ class OpenAiCompatibleAnalyzer {
             {
               'role': 'system',
               'content':
-                  '你是会话整理助手。请用简体中文总结 Codex/Claude 会话，返回严格 JSON：{"title":"短标题","summary":"主要目标、已做事项、当前状态","tags":["标签"]}。',
+                  '你是会话整理助手。请用简体中文总结 Codex/Claude 会话，返回严格 JSON：'
+                  '{"title":"短标题","projectDescription":"项目描述，用一小段说明目标和背景",'
+                  '"mainFeatures":["主要功能1","主要功能2"],'
+                  '"progressOverview":"进度概览，用一小段说明已完成、当前状态和待办",'
+                  '"tags":["标签"]}。'
+                  '内容要简明清晰。不要返回 Markdown 表格。mainFeatures 最多 5 条。',
             },
             {'role': 'user', 'content': session.promptContext},
           ],
@@ -2274,9 +2279,13 @@ class OpenAiCompatibleAnalyzer {
                 .take(6)
                 .toList()
           : <String>[];
+      final summary =
+          _structuredAiSummary(decoded) ??
+          _stringOrNull(decoded['summary']) ??
+          stripped;
       return AiAnalysis(
         title: _stringOrNull(decoded['title']) ?? fallback.displayTitle,
-        summary: _stringOrNull(decoded['summary']) ?? stripped,
+        summary: summary,
         tags: tags,
       );
     }
@@ -2285,6 +2294,35 @@ class OpenAiCompatibleAnalyzer {
       summary: stripped,
       tags: const [],
     );
+  }
+
+  static String? _structuredAiSummary(Map<String, dynamic> decoded) {
+    final description = _stringOrNull(decoded['projectDescription']);
+    final featuresValue = decoded['mainFeatures'];
+    final features = featuresValue is List
+        ? featuresValue
+              .whereType<String>()
+              .map((feature) => feature.trim())
+              .where((feature) => feature.isNotEmpty)
+              .take(5)
+              .toList()
+        : <String>[];
+    final progress = _stringOrNull(decoded['progressOverview']);
+    if (description == null && features.isEmpty && progress == null) {
+      return null;
+    }
+
+    final parts = <String>[];
+    if (description != null) {
+      parts.add('项目描述：\n$description');
+    }
+    if (features.isNotEmpty) {
+      parts.add('主要功能：\n${features.map((feature) => '- $feature').join('\n')}');
+    }
+    if (progress != null) {
+      parts.add('进度概览：\n$progress');
+    }
+    return parts.join('\n\n');
   }
 }
 

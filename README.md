@@ -16,6 +16,7 @@ build\windows\x64\runner\Release\session_bridge.exe
 - 列表展示会话来源、更新时间、工作目录、主要内容和关键消息。
 - 点击“恢复”会打开 PowerShell 并执行对应恢复命令。
 - 点击“全部 AI 分析”会顺序分析全部会话，并把结果保存到本地设置。
+- AI 内容概览按“项目描述 / 主要功能 / 进度概览”三段整理。
 - 支持分类管理、按分类筛选、给单个会话归类。
 - 支持删除会话；删除时会把原始 JSONL 移到 `%APPDATA%\SessionBridge\deleted-sessions`。
 - 设置中可修改会话目录、OpenAI 兼容 Base URL、API Key 和模型名。
