@@ -19,6 +19,7 @@ build\windows\x64\runner\Release\session_bridge.exe
 - 支持分类管理、按分类筛选、给单个会话归类。
 - 支持删除会话；删除时会把原始 JSONL 移到 `%APPDATA%\SessionBridge\deleted-sessions`。
 - 设置中可修改会话目录、OpenAI 兼容 Base URL、API Key 和模型名。
+- 设置中可选择恢复参数：Codex 追加 `--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=xhigh`，Claude 追加 `--dangerously-skip-permissions`。
 - 默认预配置本机 OpenAI 兼容服务地址，不预设 API Key；首次使用 AI 分析前需要在设置中填写。
 
 ## 开发命令

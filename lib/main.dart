@@ -1280,6 +1280,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _baseUrl;
   late final TextEditingController _apiKey;
   late final TextEditingController _model;
+  late bool _codexDangerousResume;
+  late bool _claudeSkipPermissions;
   bool _obscureKey = true;
 
   @override
@@ -1290,6 +1292,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _baseUrl = TextEditingController(text: widget.settings.baseUrl);
     _apiKey = TextEditingController(text: widget.settings.apiKey);
     _model = TextEditingController(text: widget.settings.model);
+    _codexDangerousResume = widget.settings.codexDangerousResume;
+    _claudeSkipPermissions = widget.settings.claudeSkipPermissions;
   }
 
   @override
@@ -1338,6 +1342,25 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   border: const OutlineInputBorder(),
                 ),
               ),
+              const SizedBox(height: 16),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Codex 恢复使用高级权限参数'),
+                subtitle: const Text(
+                  '追加 --ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=xhigh',
+                ),
+                value: _codexDangerousResume,
+                onChanged: (value) =>
+                    setState(() => _codexDangerousResume = value),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Claude 恢复跳过权限确认'),
+                subtitle: const Text('追加 --dangerously-skip-permissions'),
+                value: _claudeSkipPermissions,
+                onChanged: (value) =>
+                    setState(() => _claudeSkipPermissions = value),
+              ),
             ],
           ),
         ),
@@ -1356,6 +1379,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 baseUrl: _baseUrl.text.trim(),
                 apiKey: _apiKey.text.trim(),
                 model: _model.text.trim(),
+                codexDangerousResume: _codexDangerousResume,
+                claudeSkipPermissions: _claudeSkipPermissions,
                 categories: widget.settings.categories,
                 categoryBySession: widget.settings.categoryBySession,
                 analysisBySession: widget.settings.analysisBySession,
@@ -1557,6 +1582,8 @@ class AppSettings {
     required this.baseUrl,
     required this.apiKey,
     required this.model,
+    required this.codexDangerousResume,
+    required this.claudeSkipPermissions,
     required this.categories,
     required this.categoryBySession,
     required this.analysisBySession,
@@ -1567,6 +1594,8 @@ class AppSettings {
   final String baseUrl;
   final String apiKey;
   final String model;
+  final bool codexDangerousResume;
+  final bool claudeSkipPermissions;
   final List<String> categories;
   final Map<String, String> categoryBySession;
   final Map<String, StoredAnalysis> analysisBySession;
@@ -1579,6 +1608,8 @@ class AppSettings {
       baseUrl: 'http://192.168.0.16:3001/',
       apiKey: '',
       model: 'deepseek-chat',
+      codexDangerousResume: false,
+      claudeSkipPermissions: false,
       categories: const ['待处理', '开发', '运维', '资料'],
       categoryBySession: const {},
       analysisBySession: const {},
@@ -1612,6 +1643,14 @@ class AppSettings {
       baseUrl: _settingString(decoded['baseUrl'], defaults.baseUrl),
       apiKey: _settingString(decoded['apiKey'], defaults.apiKey),
       model: _settingString(decoded['model'], defaults.model),
+      codexDangerousResume: _boolSetting(
+        decoded['codexDangerousResume'],
+        defaults.codexDangerousResume,
+      ),
+      claudeSkipPermissions: _boolSetting(
+        decoded['claudeSkipPermissions'],
+        defaults.claudeSkipPermissions,
+      ),
       categories: _stringList(decoded['categories'], defaults.categories),
       categoryBySession: _stringMap(decoded['categoryBySession']),
       analysisBySession: _analysisMap(decoded['analysisBySession']),
@@ -1628,6 +1667,8 @@ class AppSettings {
         'baseUrl': baseUrl,
         'apiKey': apiKey,
         'model': model,
+        'codexDangerousResume': codexDangerousResume,
+        'claudeSkipPermissions': claudeSkipPermissions,
         'categories': categories,
         'categoryBySession': categoryBySession,
         'analysisBySession': analysisBySession.map(
@@ -1643,6 +1684,8 @@ class AppSettings {
     String? baseUrl,
     String? apiKey,
     String? model,
+    bool? codexDangerousResume,
+    bool? claudeSkipPermissions,
     List<String>? categories,
     Map<String, String>? categoryBySession,
     Map<String, StoredAnalysis>? analysisBySession,
@@ -1653,6 +1696,9 @@ class AppSettings {
       baseUrl: baseUrl ?? this.baseUrl,
       apiKey: apiKey ?? this.apiKey,
       model: model ?? this.model,
+      codexDangerousResume: codexDangerousResume ?? this.codexDangerousResume,
+      claudeSkipPermissions:
+          claudeSkipPermissions ?? this.claudeSkipPermissions,
       categories: categories ?? this.categories,
       categoryBySession: categoryBySession ?? this.categoryBySession,
       analysisBySession: analysisBySession ?? this.analysisBySession,
@@ -1700,6 +1746,13 @@ class AppSettings {
   static String _settingString(Object? value, String fallback) {
     if (value is String && value.trim().isNotEmpty) {
       return value.trim();
+    }
+    return fallback;
+  }
+
+  static bool _boolSetting(Object? value, bool fallback) {
+    if (value is bool) {
+      return value;
     }
     return fallback;
   }
@@ -1759,6 +1812,8 @@ class AgentSession {
     this.aiSummary,
     this.aiTags = const [],
     this.category = '',
+    this.codexDangerousResume = false,
+    this.claudeSkipPermissions = false,
   });
 
   final SessionSource source;
@@ -1775,6 +1830,8 @@ class AgentSession {
   final String? aiSummary;
   final List<String> aiTags;
   final String category;
+  final bool codexDangerousResume;
+  final bool claudeSkipPermissions;
 
   String get key => '${source.name}:$id:$filePath';
   String get displayTitle => _clip((aiTitle ?? title).trim(), 160);
@@ -1791,9 +1848,16 @@ class AgentSession {
   String get restoreCommandPreview {
     final quotedCwd = _quotePowerShell(cwd.isEmpty ? _homeDir : cwd);
     final quotedId = _quotePowerShell(id);
-    final command = source == SessionSource.codex
-        ? 'codex resume $quotedId'
-        : 'claude --resume $quotedId';
+    final command = switch (source) {
+      SessionSource.codex =>
+        codexDangerousResume
+            ? 'codex resume --ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=xhigh $quotedId'
+            : 'codex resume $quotedId',
+      SessionSource.claude =>
+        claudeSkipPermissions
+            ? 'claude --dangerously-skip-permissions --resume $quotedId'
+            : 'claude --resume $quotedId',
+    };
     return 'Set-Location -LiteralPath $quotedCwd; $command';
   }
 
@@ -1818,6 +1882,8 @@ class AgentSession {
     String? aiSummary,
     List<String>? aiTags,
     String? category,
+    bool? codexDangerousResume,
+    bool? claudeSkipPermissions,
   }) {
     return AgentSession(
       source: source,
@@ -1834,6 +1900,9 @@ class AgentSession {
       aiSummary: aiSummary ?? this.aiSummary,
       aiTags: aiTags ?? this.aiTags,
       category: category ?? this.category,
+      codexDangerousResume: codexDangerousResume ?? this.codexDangerousResume,
+      claudeSkipPermissions:
+          claudeSkipPermissions ?? this.claudeSkipPermissions,
     );
   }
 }
@@ -1877,6 +1946,8 @@ class SessionRepository {
       aiSummary: _stringOrNull(analysis?.summary),
       aiTags: analysis?.tags,
       category: settings.categoryBySession[session.key] ?? '',
+      codexDangerousResume: settings.codexDangerousResume,
+      claudeSkipPermissions: settings.claudeSkipPermissions,
     );
   }
 
