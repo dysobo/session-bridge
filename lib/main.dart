@@ -136,10 +136,24 @@ class _SessionHomePageState extends State<SessionHomePage> {
   }
 
   Future<void> _restore(AgentSession session) async {
-    try {
-      await SessionLauncher.restore(session);
+    final command = await showDialog<String>(
+      context: context,
+      builder: (context) => RestoreCommandDialog(session: session),
+    );
+    if (command == null) {
+      return;
+    }
+    if (command.trim().isEmpty) {
       setState(() {
-        _status = '已打开 PowerShell 恢复窗口：${session.restoreCommandPreview}';
+        _status = '恢复命令为空，已取消。';
+      });
+      return;
+    }
+
+    try {
+      await SessionLauncher.restore(session, command.trim());
+      setState(() {
+        _status = '已打开 PowerShell 恢复窗口：${command.trim()}';
       });
     } catch (error) {
       setState(() {
@@ -1265,6 +1279,86 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+class RestoreCommandDialog extends StatefulWidget {
+  const RestoreCommandDialog({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  State<RestoreCommandDialog> createState() => _RestoreCommandDialogState();
+}
+
+class _RestoreCommandDialogState extends State<RestoreCommandDialog> {
+  late final TextEditingController _command;
+
+  @override
+  void initState() {
+    super.initState();
+    _command = TextEditingController(
+      text: widget.session.restoreCommandPreview,
+    );
+  }
+
+  @override
+  void dispose() {
+    _command.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('确认恢复命令'),
+      content: SizedBox(
+        width: 760,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                SourceChip(source: widget.session.source),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    widget.session.displayTitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _command,
+              minLines: 5,
+              maxLines: 10,
+              style: const TextStyle(fontFamily: 'Consolas', fontSize: 13),
+              decoration: const InputDecoration(
+                labelText: '即将在 PowerShell 中执行的命令',
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.of(context).pop(_command.text),
+          icon: const Icon(Icons.terminal),
+          label: const Text('确认恢复'),
+        ),
+      ],
+    );
+  }
+}
+
 class SettingsDialog extends StatefulWidget {
   const SettingsDialog({super.key, required this.settings});
 
@@ -2129,9 +2223,8 @@ class SessionRepository {
 class SessionLauncher {
   const SessionLauncher._();
 
-  static Future<void> restore(AgentSession session) async {
+  static Future<void> restore(AgentSession session, String command) async {
     final cwd = session.cwd.isEmpty ? _homeDir : session.cwd;
-    final command = session.restoreCommandPreview;
     await Process.start(
       'cmd.exe',
       [
