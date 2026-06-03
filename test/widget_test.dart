@@ -38,6 +38,36 @@ void main() {
 
     expect(find.text('custom command'), findsOneWidget);
   });
+
+  test('extracts AI message from OpenAI content blocks', () {
+    final content = OpenAiCompatibleAnalyzer.extractAiMessage({
+      'choices': [
+        {
+          'message': {
+            'role': 'assistant',
+            'content': [
+              {'type': 'text', 'text': '{"title":"ok"}'},
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(content, '{"title":"ok"}');
+  });
+
+  test('extracts AI message from Anthropic-style content', () {
+    final content = OpenAiCompatibleAnalyzer.extractAiMessage({
+      'id': 'msg_1',
+      'type': 'message',
+      'role': 'assistant',
+      'content': [
+        {'type': 'text', 'text': '{"title":"mimo ok"}'},
+      ],
+    });
+
+    expect(content, '{"title":"mimo ok"}');
+  });
 }
 
 class SessionBridgeAppForTest extends StatelessWidget {

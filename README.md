@@ -17,6 +17,7 @@ build\windows\x64\runner\Release\session_bridge.exe
 - 点击“恢复”会先弹出可编辑命令确认框，确认后再打开 PowerShell 执行。
 - 点击“全部 AI 分析”会顺序分析全部会话，并把结果保存到本地设置。
 - AI 内容概览按“项目描述 / 主要功能 / 进度概览”三段整理。
+- AI 响应解析兼容 OpenAI 字符串正文、OpenAI content blocks 和 Anthropic 风格 content blocks。
 - 支持分类管理、按分类筛选、给单个会话归类。
 - 支持删除会话；删除时会把原始 JSONL 移到 `%APPDATA%\SessionBridge\deleted-sessions`。
 - 设置中可修改会话目录、OpenAI 兼容 Base URL、API Key 和模型名。

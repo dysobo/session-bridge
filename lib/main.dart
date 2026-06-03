@@ -2318,35 +2318,63 @@ class OpenAiCompatibleAnalyzer {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw Exception('HTTP ${response.statusCode}: ${_clip(body, 240)}');
       }
-      final content = _extractAiMessage(jsonDecode(body));
+      final content = extractAiMessage(jsonDecode(body));
       return _parseAiAnalysis(content, session);
     } finally {
       client.close(force: true);
     }
   }
 
-  static String _extractAiMessage(Object? decoded) {
+  static String extractAiMessage(Object? decoded) {
     if (decoded is! Map<String, dynamic>) {
       throw const FormatException('AI 响应不是 JSON 对象');
     }
     final choices = decoded['choices'];
-    if (choices is! List || choices.isEmpty) {
-      throw const FormatException('AI 响应缺少 choices');
-    }
-    final first = choices.first;
-    if (first is! Map<String, dynamic>) {
-      throw const FormatException('AI 响应 choices 格式异常');
-    }
-    final message = first['message'];
-    if (message is Map<String, dynamic>) {
-      final content = message['content'];
-      if (content is String && content.trim().isNotEmpty) {
-        return content.trim();
+    if (choices is List && choices.isNotEmpty) {
+      final first = choices.first;
+      if (first is! Map<String, dynamic>) {
+        throw const FormatException('AI 响应 choices 格式异常');
+      }
+      final message = first['message'];
+      if (message is Map<String, dynamic>) {
+        final content = _extractContentText(message['content']);
+        if (content.isNotEmpty) {
+          return content;
+        }
+        final reasoningContent = _extractContentText(
+          message['reasoning_content'],
+        );
+        if (reasoningContent.isNotEmpty) {
+          return reasoningContent;
+        }
+      }
+      final text = _extractContentText(first['text']);
+      if (text.isNotEmpty) {
+        return text;
+      }
+      final delta = first['delta'];
+      if (delta is Map<String, dynamic>) {
+        final content = _extractContentText(delta['content']);
+        if (content.isNotEmpty) {
+          return content;
+        }
       }
     }
-    final text = first['text'];
-    if (text is String && text.trim().isNotEmpty) {
-      return text.trim();
+
+    final outputText = _extractContentText(decoded['output_text']);
+    if (outputText.isNotEmpty) {
+      return outputText;
+    }
+    final output = decoded['output'];
+    if (output is List) {
+      final content = _extractContentText(output);
+      if (content.isNotEmpty) {
+        return content;
+      }
+    }
+    final anthropicContent = _extractContentText(decoded['content']);
+    if (anthropicContent.isNotEmpty) {
+      return anthropicContent;
     }
     throw const FormatException('AI 响应缺少正文');
   }
