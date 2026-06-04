@@ -4,6 +4,47 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+const List<String> kAiSessionCategories = [
+  '会话管理与 AI 助手工具',
+  'AI 网关、模型与接口服务',
+  '客户端应用开发',
+  'Web 工具与前端页面',
+  '业务系统与内容产品',
+  '服务器部署与容器运维',
+  '家庭网络、代理与影音服务',
+  'Windows 本机维护与系统修复',
+  '内容创作、图像/语音生成与写作',
+  '硬件、Android 调试与设备接入',
+  '咨询、方案与资料整理',
+  '测试/无效/其它',
+];
+
+const String kFallbackAiCategory = '测试/无效/其它';
+
+const Map<String, String> kAiSessionCategoryDescriptions = {
+  '会话管理与 AI 助手工具': 'Session Bridge、Codex/Claude 配置、CLI 能力、会话恢复和本地 AI 助手工作流。',
+  'AI 网关、模型与接口服务': 'new-api、CLIProxyAPI、OpenClaw、模型接入、API Key、模型可用性和接口配置。',
+  '客户端应用开发': 'Flutter、Android、Windows 托盘、WinForms、桌面/移动客户端和播放器应用。',
+  'Web 工具与前端页面': '单页工具、静态站点、前端页面、WebView 壳、项目展示页和浏览器插件。',
+  '业务系统与内容产品': '考勤、StarKids、MoonTV/LunaTV、书签导航、项目产品化和业务功能迭代。',
+  '服务器部署与容器运维': 'SSH、Docker、1Panel、Nginx、OpenResty、数据库、备份、迁移和远程部署。',
+  '家庭网络、代理与影音服务': 'mihomo、Clash、DNS、PT/BT、NAS、Emby、Open WebUI、内网服务和影音链路。',
+  'Windows 本机维护与系统修复': '磁盘清理、Microsoft Store、winget、环境变量、开发环境、系统组件修复。',
+  '内容创作、图像/语音生成与写作': '小红书、小说编辑器、儿童漫画、AI 生图、语音识别、TTS 和创作流程。',
+  '硬件、Android 调试与设备接入': 'ESP32、墨水屏、ADB、USB/OTG、手机调试、硬件驱动和设备连接。',
+  '咨询、方案与资料整理': '副业建议、方案调研、文档整理、项目记录、知识迁移和非执行型咨询。',
+  '测试/无效/其它': '初始问候、模型不可用、登录/访问测试、占位会话、中断会话，以及暂不适合其它分类的内容。',
+};
+
+typedef SyncUploadProgress =
+    void Function(
+      int done,
+      int total,
+      AgentSession session, {
+      int? chunkIndex,
+      int? chunkTotal,
+    });
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const SessionBridgeApp());
@@ -48,6 +89,7 @@ class _SessionHomePageState extends State<SessionHomePage> {
   bool _loading = true;
   bool _analyzing = false;
   bool _analyzingAll = false;
+  bool _syncing = false;
   int _analysisDone = 0;
   int _analysisTotal = 0;
   String? _error;
@@ -133,6 +175,70 @@ class _SessionHomePageState extends State<SessionHomePage> {
     }
     await updated.save();
     await _load();
+  }
+
+  Future<void> _showAiCategoryOrganizer() async {
+    if (_settings.apiKey.trim().isEmpty || _settings.baseUrl.trim().isEmpty) {
+      setState(() {
+        _status = '请先在设置中填写 Base URL 和 API Key。';
+      });
+      await _showSettings();
+      return;
+    }
+    if (_sessions.isEmpty) {
+      setState(() {
+        _status = '没有可分类的会话。';
+      });
+      return;
+    }
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (context) => AiCategoryOrganizerPage(
+          settings: _settings,
+          sessions: _sessions,
+          onApply: _applyAiCategoryPlan,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _applyAiCategoryPlan(
+    AiCategoryPlan plan, {
+    required bool replaceAll,
+  }) async {
+    final sessionKeys = _sessions.map((session) => session.key).toSet();
+    final assignments = replaceAll
+        ? <String, String>{}
+        : Map<String, String>.from(_settings.categoryBySession);
+    for (final assignment in plan.assignments) {
+      if (!sessionKeys.contains(assignment.sessionKey)) {
+        continue;
+      }
+      assignments[assignment.sessionKey] = assignment.category;
+    }
+    final updatedSettings = _settings.copyWith(
+      categories: kAiSessionCategories,
+      categoryBySession: assignments,
+    );
+    await updatedSettings.save();
+    final updatedSessions = _sessions
+        .map(
+          (session) =>
+              session.copyWith(category: assignments[session.key] ?? ''),
+        )
+        .toList();
+    setState(() {
+      _settings = updatedSettings;
+      _sessions = updatedSessions;
+      _selected = _pickSelected(updatedSessions);
+      if (_categoryFilter != null &&
+          !updatedSettings.categories.contains(_categoryFilter)) {
+        _categoryFilter = null;
+      }
+      _status = replaceAll
+          ? 'AI 分类已覆盖全部 ${plan.assignments.length} 个会话。'
+          : 'AI 增量分类已应用 ${plan.assignments.length} 个会话。';
+    });
   }
 
   Future<void> _restore(AgentSession session) async {
@@ -362,6 +468,151 @@ class _SessionHomePageState extends State<SessionHomePage> {
     }
   }
 
+  bool get _hasSyncConfig {
+    return _settings.syncServerUrl.trim().isNotEmpty &&
+        _settings.syncAccount.trim().isNotEmpty &&
+        _settings.syncKey.trim().isNotEmpty;
+  }
+
+  Future<void> _uploadSync() async {
+    if (_syncing) {
+      return;
+    }
+    if (!_hasSyncConfig) {
+      setState(() {
+        _status = '请先在设置中填写同步服务器、账号和同步密钥。';
+      });
+      await _showSettings();
+      return;
+    }
+    setState(() {
+      _syncing = true;
+      _status = '正在上传同步数据...';
+    });
+    try {
+      final result = await SessionSyncClient(_settings).upload(
+        _sessions,
+        onProgress: (done, total, session, {chunkIndex, chunkTotal}) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            if (chunkIndex != null && chunkTotal != null) {
+              _status =
+                  '正在上传同步数据：${done + 1}/$total ${session.displayTitle}（分块 $chunkIndex/$chunkTotal）';
+            } else {
+              _status = '正在上传同步数据：$done/$total ${session.displayTitle}';
+            }
+          });
+        },
+      );
+      setState(() {
+        _syncing = false;
+        _status =
+            '上传同步完成：发送 ${result.sent} 个，服务端更新 ${result.updated} 个，跳过 ${result.skipped} 个。';
+      });
+    } catch (error) {
+      setState(() {
+        _syncing = false;
+        _status = '上传同步失败：$error';
+      });
+    }
+  }
+
+  Future<void> _downloadSync() async {
+    if (_syncing) {
+      return;
+    }
+    if (!_hasSyncConfig) {
+      setState(() {
+        _status = '请先在设置中填写同步服务器、账号和同步密钥。';
+      });
+      await _showSettings();
+      return;
+    }
+    setState(() {
+      _syncing = true;
+      _status = '正在下载同步数据...';
+    });
+    try {
+      final result = await SessionSyncClient(_settings).download();
+      final applyResult = await _applyDownloadedSessions(result.sessions);
+      final status =
+          '下载同步完成：远端 ${result.sessions.length} 个，写入 ${applyResult.written} 个，跳过 ${applyResult.skipped} 个。';
+      await _load();
+      setState(() {
+        _syncing = false;
+        _status = status;
+      });
+    } catch (error) {
+      setState(() {
+        _syncing = false;
+        _status = '下载同步失败：$error';
+      });
+    }
+  }
+
+  Future<SyncApplyResult> _applyDownloadedSessions(
+    List<SyncedSession> sessions,
+  ) async {
+    var written = 0;
+    var skipped = 0;
+    var settings = _settings;
+    for (final session in sessions) {
+      final relativePath = _safeRelativePath(session.relativePath);
+      if (relativePath == null) {
+        skipped++;
+        continue;
+      }
+      final root = session.source == SessionSource.codex
+          ? settings.codexRoot
+          : settings.claudeRoot;
+      final target = File(_joinPath(root, relativePath));
+      final remoteBytes = base64Decode(session.fileContentBase64);
+      if (await target.exists()) {
+        final localBytes = await target.readAsBytes();
+        if (base64Encode(localBytes) == session.fileContentBase64) {
+          skipped++;
+        } else {
+          await _backupBeforeOverwrite(target);
+          await target.writeAsBytes(remoteBytes, flush: true);
+          written++;
+        }
+      } else {
+        await target.parent.create(recursive: true);
+        await target.writeAsBytes(remoteBytes, flush: true);
+        written++;
+      }
+
+      final localKey = '${session.source.name}:${session.id}:${target.path}';
+      if (session.category.isNotEmpty) {
+        settings = settings.withCategory(localKey, session.category);
+      }
+      if (session.aiTitle.isNotEmpty || session.aiSummary.isNotEmpty) {
+        settings = settings.withAnalysis(
+          localKey,
+          StoredAnalysis(
+            title: session.aiTitle,
+            summary: session.aiSummary,
+            tags: session.aiTags,
+          ),
+        );
+      }
+    }
+    await settings.save();
+    _settings = settings;
+    return SyncApplyResult(written: written, skipped: skipped);
+  }
+
+  Future<void> _backupBeforeOverwrite(File file) async {
+    final backupDir = Directory('${AppSettings.appDataDir}\\sync-backups');
+    await backupDir.create(recursive: true);
+    final backup = File(
+      '${backupDir.path}\\${_timestampForFile(DateTime.now())}_${_basename(file.path)}',
+    );
+    await file.copy(backup.path);
+  }
+
   Future<bool?> _confirmDelete(AgentSession session) {
     return showDialog<bool>(
       context: context,
@@ -398,7 +649,9 @@ class _SessionHomePageState extends State<SessionHomePage> {
         title: const Text('Session Bridge'),
         actions: [
           TextButton.icon(
-            onPressed: _loading || _analyzingAll ? null : _analyzeAllVisible,
+            onPressed: _loading || _analyzingAll || _syncing
+                ? null
+                : _analyzeAllVisible,
             icon: _analyzingAll
                 ? const SizedBox(
                     width: 16,
@@ -409,6 +662,29 @@ class _SessionHomePageState extends State<SessionHomePage> {
             label: Text(
               _analyzingAll ? '$_analysisDone/$_analysisTotal' : '全部 AI 分析',
             ),
+          ),
+          TextButton.icon(
+            onPressed: _loading || _analyzingAll || _syncing
+                ? null
+                : _showAiCategoryOrganizer,
+            icon: const Icon(Icons.account_tree_outlined),
+            label: const Text('AI 分类整理'),
+          ),
+          TextButton.icon(
+            onPressed: _loading || _syncing ? null : _uploadSync,
+            icon: _syncing
+                ? const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.cloud_upload_outlined),
+            label: const Text('上传同步'),
+          ),
+          TextButton.icon(
+            onPressed: _loading || _syncing ? null : _downloadSync,
+            icon: const Icon(Icons.cloud_download_outlined),
+            label: const Text('下载同步'),
           ),
           IconButton(
             tooltip: '分类管理',
@@ -532,78 +808,109 @@ class _ToolbarState extends State<_Toolbar> {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
       color: Theme.of(context).colorScheme.surface,
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            SizedBox(
-              width: 360,
-              child: TextField(
-                controller: _queryController,
-                onChanged: widget.onQueryChanged,
-                decoration: const InputDecoration(
-                  isDense: true,
-                  prefixIcon: Icon(Icons.search),
-                  hintText: '搜索会话、目录或内容',
-                  border: OutlineInputBorder(),
-                ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 980;
+          final search = SizedBox(
+            width: compact ? constraints.maxWidth : 360,
+            child: TextField(
+              controller: _queryController,
+              onChanged: widget.onQueryChanged,
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search),
+                hintText: '搜索会话、目录或内容',
+                border: OutlineInputBorder(),
               ),
             ),
-            const SizedBox(width: 16),
-            Wrap(
-              spacing: 8,
+          );
+          final sourceFilters = Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                label: Text('全部 ${widget.totalCount}'),
+                selected: widget.filter == null,
+                onSelected: (_) => widget.onFilterChanged(null),
+              ),
+              ChoiceChip(
+                label: Text('Codex ${widget.codexCount}'),
+                selected: widget.filter == SessionSource.codex,
+                onSelected: (_) => widget.onFilterChanged(SessionSource.codex),
+              ),
+              ChoiceChip(
+                label: Text('Claude ${widget.claudeCount}'),
+                selected: widget.filter == SessionSource.claude,
+                onSelected: (_) => widget.onFilterChanged(SessionSource.claude),
+              ),
+            ],
+          );
+          final categoryFilters = Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              ChoiceChip(
+                label: const Text('全部分类'),
+                selected: widget.categoryFilter == null,
+                onSelected: (_) => widget.onCategoryFilterChanged(null),
+              ),
+              ChoiceChip(
+                label: const Text('未分类'),
+                selected: widget.categoryFilter == '',
+                onSelected: (_) => widget.onCategoryFilterChanged(''),
+              ),
+              ...widget.categories.map(
+                (category) => ChoiceChip(
+                  label: Text(category),
+                  selected: widget.categoryFilter == category,
+                  onSelected: (_) => widget.onCategoryFilterChanged(category),
+                ),
+              ),
+            ],
+          );
+          final hint = Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.bolt_outlined, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                'AI 摘要可在详情页按需生成',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          );
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                ChoiceChip(
-                  label: Text('全部 ${widget.totalCount}'),
-                  selected: widget.filter == null,
-                  onSelected: (_) => widget.onFilterChanged(null),
-                ),
-                ChoiceChip(
-                  label: Text('Codex ${widget.codexCount}'),
-                  selected: widget.filter == SessionSource.codex,
-                  onSelected: (_) =>
-                      widget.onFilterChanged(SessionSource.codex),
-                ),
-                ChoiceChip(
-                  label: Text('Claude ${widget.claudeCount}'),
-                  selected: widget.filter == SessionSource.claude,
-                  onSelected: (_) =>
-                      widget.onFilterChanged(SessionSource.claude),
-                ),
+                search,
+                const SizedBox(height: 10),
+                sourceFilters,
+                const SizedBox(height: 10),
+                categoryFilters,
+                const SizedBox(height: 8),
+                hint,
               ],
-            ),
-            const SizedBox(width: 24),
-            Wrap(
-              spacing: 8,
-              children: [
-                ChoiceChip(
-                  label: const Text('全部分类'),
-                  selected: widget.categoryFilter == null,
-                  onSelected: (_) => widget.onCategoryFilterChanged(null),
-                ),
-                ChoiceChip(
-                  label: const Text('未分类'),
-                  selected: widget.categoryFilter == '',
-                  onSelected: (_) => widget.onCategoryFilterChanged(''),
-                ),
-                ...widget.categories.map(
-                  (category) => ChoiceChip(
-                    label: Text(category),
-                    selected: widget.categoryFilter == category,
-                    onSelected: (_) => widget.onCategoryFilterChanged(category),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(width: 24),
-            const Icon(Icons.bolt_outlined, size: 18),
-            const SizedBox(width: 6),
-            Text(
-              'AI 摘要可在详情页按需生成',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ),
+            );
+          }
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  search,
+                  const SizedBox(width: 16),
+                  sourceFilters,
+                  const Spacer(),
+                  hint,
+                ],
+              ),
+              const SizedBox(height: 10),
+              categoryFilters,
+            ],
+          );
+        },
       ),
     );
   }
@@ -1096,19 +1403,24 @@ class CategoryChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: const Color(0xFFEFF6FF),
-        border: Border.all(color: const Color(0xFFBFDBFE)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        text,
-        style: const TextStyle(
-          color: Color(0xFF1D4ED8),
-          fontWeight: FontWeight.w700,
-          fontSize: 12,
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 180),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEFF6FF),
+          border: Border.all(color: const Color(0xFFBFDBFE)),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(
+          text,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Color(0xFF1D4ED8),
+            fontWeight: FontWeight.w700,
+            fontSize: 12,
+          ),
         ),
       ),
     );
@@ -1374,9 +1686,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final TextEditingController _baseUrl;
   late final TextEditingController _apiKey;
   late final TextEditingController _model;
+  late final TextEditingController _syncServerUrl;
+  late final TextEditingController _syncAccount;
+  late final TextEditingController _syncKey;
   late bool _codexDangerousResume;
   late bool _claudeSkipPermissions;
   bool _obscureKey = true;
+  bool _obscureSyncKey = true;
 
   @override
   void initState() {
@@ -1386,6 +1702,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _baseUrl = TextEditingController(text: widget.settings.baseUrl);
     _apiKey = TextEditingController(text: widget.settings.apiKey);
     _model = TextEditingController(text: widget.settings.model);
+    _syncServerUrl = TextEditingController(text: widget.settings.syncServerUrl);
+    _syncAccount = TextEditingController(text: widget.settings.syncAccount);
+    _syncKey = TextEditingController(text: widget.settings.syncKey);
     _codexDangerousResume = widget.settings.codexDangerousResume;
     _claudeSkipPermissions = widget.settings.claudeSkipPermissions;
   }
@@ -1397,6 +1716,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _baseUrl.dispose();
     _apiKey.dispose();
     _model.dispose();
+    _syncServerUrl.dispose();
+    _syncAccount.dispose();
+    _syncKey.dispose();
     super.dispose();
   }
 
@@ -1455,6 +1777,30 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 onChanged: (value) =>
                     setState(() => _claudeSkipPermissions = value),
               ),
+              const Divider(height: 28),
+              _field(_syncServerUrl, '同步服务器 URL', Icons.cloud_outlined),
+              const SizedBox(height: 12),
+              _field(_syncAccount, '同步账号', Icons.person_outline),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _syncKey,
+                obscureText: _obscureSyncKey,
+                decoration: InputDecoration(
+                  labelText: '同步密钥',
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  suffixIcon: IconButton(
+                    tooltip: _obscureSyncKey ? '显示' : '隐藏',
+                    onPressed: () =>
+                        setState(() => _obscureSyncKey = !_obscureSyncKey),
+                    icon: Icon(
+                      _obscureSyncKey
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
+                  ),
+                  border: const OutlineInputBorder(),
+                ),
+              ),
             ],
           ),
         ),
@@ -1473,6 +1819,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 baseUrl: _baseUrl.text.trim(),
                 apiKey: _apiKey.text.trim(),
                 model: _model.text.trim(),
+                syncServerUrl: _syncServerUrl.text.trim(),
+                syncAccount: _syncAccount.text.trim(),
+                syncKey: _syncKey.text.trim(),
                 codexDangerousResume: _codexDangerousResume,
                 claudeSkipPermissions: _claudeSkipPermissions,
                 categories: widget.settings.categories,
@@ -1619,6 +1968,364 @@ class _CategoryDialogState extends State<CategoryDialog> {
   }
 }
 
+class AiCategoryOrganizerPage extends StatefulWidget {
+  const AiCategoryOrganizerPage({
+    super.key,
+    required this.settings,
+    required this.sessions,
+    required this.onApply,
+  });
+
+  final AppSettings settings;
+  final List<AgentSession> sessions;
+  final Future<void> Function(AiCategoryPlan plan, {required bool replaceAll})
+  onApply;
+
+  @override
+  State<AiCategoryOrganizerPage> createState() =>
+      _AiCategoryOrganizerPageState();
+}
+
+class _AiCategoryOrganizerPageState extends State<AiCategoryOrganizerPage> {
+  bool _loading = true;
+  bool _applying = false;
+  bool _applied = false;
+  bool _fullRefresh = false;
+  String? _error;
+  AiCategoryPlan? _plan;
+
+  @override
+  void initState() {
+    super.initState();
+    _fullRefresh = !_hasStableAiCategories(widget.settings.categories);
+    unawaited(_generate());
+  }
+
+  List<AgentSession> get _targets {
+    if (_fullRefresh) {
+      return widget.sessions;
+    }
+    return widget.sessions
+        .where((session) => !kAiSessionCategories.contains(session.category))
+        .toList(growable: false);
+  }
+
+  Future<void> _generate({bool? fullRefresh}) async {
+    if (fullRefresh != null) {
+      _fullRefresh = fullRefresh;
+    }
+    final targets = _targets;
+    setState(() {
+      _loading = true;
+      _error = null;
+      _plan = null;
+      _applied = false;
+    });
+    if (targets.isEmpty) {
+      setState(() {
+        _loading = false;
+        _plan = AiCategoryPlan.fromExisting(widget.sessions);
+        _applied = true;
+      });
+      return;
+    }
+    try {
+      final plan = await OpenAiCompatibleAnalyzer(
+        widget.settings,
+      ).classifySessions(targets, fullRefresh: _fullRefresh);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _plan = plan;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  Future<void> _apply() async {
+    final plan = _plan;
+    if (plan == null || _applying || _applied) {
+      return;
+    }
+    setState(() {
+      _applying = true;
+    });
+    try {
+      await widget.onApply(plan, replaceAll: _fullRefresh);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _applying = false;
+        _applied = true;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _applying = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final plan = _plan;
+    final targets = _targets;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('AI 分类整理'),
+        actions: [
+          if (!_loading)
+            TextButton.icon(
+              onPressed: () => _generate(fullRefresh: true),
+              icon: const Icon(Icons.replay_outlined),
+              label: const Text('重新全量分类'),
+            ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: _loading
+          ? Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text(
+                    _fullRefresh
+                        ? '正在基于全部 ${targets.length} 个会话生成分类页面...'
+                        : '正在增量归类 ${targets.length} 个新会话...',
+                  ),
+                ],
+              ),
+            )
+          : _error != null
+          ? _EmptyState(
+              icon: Icons.error_outline,
+              title: 'AI 分类失败',
+              detail: _error!,
+              actionLabel: '重试',
+              onAction: _generate,
+            )
+          : plan == null
+          ? const _EmptyState(
+              icon: Icons.category_outlined,
+              title: '没有分类结果',
+              detail: '当前没有需要展示的 AI 分类结果。',
+            )
+          : Column(
+              children: [
+                Expanded(
+                  child: _AiCategoryPlanView(
+                    plan: plan,
+                    sessions: widget.sessions,
+                    fullRefresh: _fullRefresh,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _fullRefresh
+                              ? '应用后会替换为新的 12 类，并覆盖全部会话分类。'
+                              : '应用后只写入本次增量归类结果，既有分类保持不变。',
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      OutlinedButton.icon(
+                        onPressed: _loading || _applying
+                            ? null
+                            : () => _generate(fullRefresh: false),
+                        icon: const Icon(Icons.playlist_add_check_outlined),
+                        label: const Text('只归类新增'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.icon(
+                        onPressed: _applied || _applying ? null : _apply,
+                        icon: _applying
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.save_alt_outlined),
+                        label: Text(_applied ? '已应用' : '一键应用'),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+}
+
+class _AiCategoryPlanView extends StatelessWidget {
+  const _AiCategoryPlanView({
+    required this.plan,
+    required this.sessions,
+    required this.fullRefresh,
+  });
+
+  final AiCategoryPlan plan;
+  final List<AgentSession> sessions;
+  final bool fullRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final sessionByKey = {for (final session in sessions) session.key: session};
+    final counts = plan.countsByCategory;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                fullRefresh
+                    ? Icons.account_tree_outlined
+                    : Icons.playlist_add_check_outlined,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  fullRefresh ? '全量分类结果' : '增量分类结果',
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              Text('共 ${plan.assignments.length} 个会话'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            fullRefresh
+                ? '这套分类用于替换旧的粗分类，后续新增会话会继续归入这些分类。'
+                : '当前分类体系保持不变，本页只展示需要新增归类的会话。',
+            style: Theme.of(context).textTheme.bodyMedium,
+          ),
+          const SizedBox(height: 16),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: plan.categories.map((category) {
+              return Container(
+                width: 280,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surface,
+                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            category,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        CategoryChip(text: '${counts[category] ?? 0}'),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      plan.categoryDescriptions[category] ??
+                          kAiSessionCategoryDescriptions[category] ??
+                          '',
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 20),
+          ...plan.categories.map((category) {
+            final items = plan.assignmentsFor(category);
+            return Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ExpansionTile(
+                initiallyExpanded: items.isNotEmpty,
+                title: Text('$category (${items.length})'),
+                subtitle: Text(
+                  plan.categoryDescriptions[category] ??
+                      kAiSessionCategoryDescriptions[category] ??
+                      '',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                children: items.map((assignment) {
+                  final session = sessionByKey[assignment.sessionKey];
+                  return ListTile(
+                    dense: true,
+                    leading: session == null
+                        ? const Icon(Icons.help_outline)
+                        : SourceChip(source: session.source),
+                    title: Text(
+                      session?.displayTitle ?? assignment.sessionKey,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    subtitle: Text(
+                      assignment.reason.isEmpty
+                          ? 'AI 已归入此类。'
+                          : assignment.reason,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: session == null
+                        ? null
+                        : Text(
+                            session.displayUpdatedAt,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                  );
+                }).toList(),
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
 enum SessionSource { codex, claude }
 
 extension SessionSourceLabel on SessionSource {
@@ -1676,6 +2383,9 @@ class AppSettings {
     required this.baseUrl,
     required this.apiKey,
     required this.model,
+    required this.syncServerUrl,
+    required this.syncAccount,
+    required this.syncKey,
     required this.codexDangerousResume,
     required this.claudeSkipPermissions,
     required this.categories,
@@ -1688,6 +2398,9 @@ class AppSettings {
   final String baseUrl;
   final String apiKey;
   final String model;
+  final String syncServerUrl;
+  final String syncAccount;
+  final String syncKey;
   final bool codexDangerousResume;
   final bool claudeSkipPermissions;
   final List<String> categories;
@@ -1702,9 +2415,12 @@ class AppSettings {
       baseUrl: 'http://192.168.0.16:3001/',
       apiKey: '',
       model: 'deepseek-chat',
+      syncServerUrl: '',
+      syncAccount: '',
+      syncKey: '',
       codexDangerousResume: false,
       claudeSkipPermissions: false,
-      categories: const ['待处理', '开发', '运维', '资料'],
+      categories: kAiSessionCategories,
       categoryBySession: const {},
       analysisBySession: const {},
     );
@@ -1737,6 +2453,12 @@ class AppSettings {
       baseUrl: _settingString(decoded['baseUrl'], defaults.baseUrl),
       apiKey: _settingString(decoded['apiKey'], defaults.apiKey),
       model: _settingString(decoded['model'], defaults.model),
+      syncServerUrl: _settingString(
+        decoded['syncServerUrl'],
+        defaults.syncServerUrl,
+      ),
+      syncAccount: _settingString(decoded['syncAccount'], defaults.syncAccount),
+      syncKey: _settingString(decoded['syncKey'], defaults.syncKey),
       codexDangerousResume: _boolSetting(
         decoded['codexDangerousResume'],
         defaults.codexDangerousResume,
@@ -1761,6 +2483,9 @@ class AppSettings {
         'baseUrl': baseUrl,
         'apiKey': apiKey,
         'model': model,
+        'syncServerUrl': syncServerUrl,
+        'syncAccount': syncAccount,
+        'syncKey': syncKey,
         'codexDangerousResume': codexDangerousResume,
         'claudeSkipPermissions': claudeSkipPermissions,
         'categories': categories,
@@ -1778,6 +2503,9 @@ class AppSettings {
     String? baseUrl,
     String? apiKey,
     String? model,
+    String? syncServerUrl,
+    String? syncAccount,
+    String? syncKey,
     bool? codexDangerousResume,
     bool? claudeSkipPermissions,
     List<String>? categories,
@@ -1790,6 +2518,9 @@ class AppSettings {
       baseUrl: baseUrl ?? this.baseUrl,
       apiKey: apiKey ?? this.apiKey,
       model: model ?? this.model,
+      syncServerUrl: syncServerUrl ?? this.syncServerUrl,
+      syncAccount: syncAccount ?? this.syncAccount,
+      syncKey: syncKey ?? this.syncKey,
       codexDangerousResume: codexDangerousResume ?? this.codexDangerousResume,
       claudeSkipPermissions:
           claudeSkipPermissions ?? this.claudeSkipPermissions,
@@ -1895,6 +2626,7 @@ class AgentSession {
     required this.source,
     required this.id,
     required this.filePath,
+    this.relativePath = '',
     required this.cwd,
     required this.title,
     required this.summary,
@@ -1913,6 +2645,7 @@ class AgentSession {
   final SessionSource source;
   final String id;
   final String filePath;
+  final String relativePath;
   final String cwd;
   final String title;
   final String summary;
@@ -1971,6 +2704,36 @@ class AgentSession {
     return _clip(buffer.toString(), 12000);
   }
 
+  String categoryContext(String ref) {
+    final firstUser = turns
+        .where((turn) => turn.role != 'assistant')
+        .firstOrNull;
+    final lastUser = turns.where((turn) => turn.role != 'assistant').lastOrNull;
+    final lastAssistant = turns
+        .where((turn) => turn.role == 'assistant')
+        .lastOrNull;
+    final buffer = StringBuffer()
+      ..writeln('Ref: $ref')
+      ..writeln('Source: ${source.label}')
+      ..writeln('Title: $displayTitle')
+      ..writeln('Category: ${category.isEmpty ? '未分类' : category}')
+      ..writeln('CWD: $cwd')
+      ..writeln('Updated: $displayUpdatedAt')
+      ..writeln('Messages: $messageCount')
+      ..writeln('Tags: ${aiTags.join(', ')}')
+      ..writeln('Summary: ${_clip(displaySummary, 520)}');
+    if (firstUser != null) {
+      buffer.writeln('FirstUser: ${_clip(firstUser.text, 220)}');
+    }
+    if (lastUser != null && lastUser != firstUser) {
+      buffer.writeln('LastUser: ${_clip(lastUser.text, 220)}');
+    }
+    if (lastAssistant != null) {
+      buffer.writeln('LastAssistant: ${_clip(lastAssistant.text, 220)}');
+    }
+    return _clip(buffer.toString(), 1400);
+  }
+
   AgentSession copyWith({
     String? aiTitle,
     String? aiSummary,
@@ -1983,6 +2746,7 @@ class AgentSession {
       source: source,
       id: id,
       filePath: filePath,
+      relativePath: relativePath,
       cwd: cwd,
       title: title,
       summary: summary,
@@ -2144,6 +2908,7 @@ class SessionRepository {
       source: SessionSource.codex,
       id: id,
       filePath: file.path,
+      relativePath: _relativePath(settings.codexRoot, file.path),
       cwd: cwd,
       title: _buildTitle(cleanTurns, id),
       summary: _buildSummary(cleanTurns),
@@ -2209,6 +2974,7 @@ class SessionRepository {
       source: SessionSource.claude,
       id: id,
       filePath: file.path,
+      relativePath: _relativePath(settings.claudeRoot, file.path),
       cwd: cwd,
       title: _buildTitle(cleanTurns, id),
       summary: _buildSummary(cleanTurns),
@@ -2268,12 +3034,519 @@ class SessionTrash {
   }
 }
 
+class SessionSyncClient {
+  const SessionSyncClient(this.settings);
+
+  final AppSettings settings;
+  static const int _chunkUploadThreshold = 512 * 1024;
+  static const int _chunkSize = 256 * 1024;
+
+  Future<SyncUploadResult> upload(
+    List<AgentSession> sessions, {
+    SyncUploadProgress? onProgress,
+  }) async {
+    var sent = 0;
+    var updated = 0;
+    var skipped = 0;
+    var done = 0;
+    final total = sessions.length;
+    for (final session in sessions) {
+      final file = File(session.filePath);
+      if (!await file.exists()) {
+        skipped++;
+        done++;
+        onProgress?.call(done, total, session);
+        continue;
+      }
+      final bytes = await file.readAsBytes();
+      final decoded = await _uploadSession(
+        session,
+        bytes,
+        done,
+        total,
+        onProgress,
+      );
+      sent += _intValue(decoded['sent']);
+      updated += _intValue(decoded['updated']);
+      skipped += _intValue(decoded['skipped']);
+      done++;
+      onProgress?.call(done, total, session);
+    }
+    return SyncUploadResult(sent: sent, updated: updated, skipped: skipped);
+  }
+
+  Future<Map<String, dynamic>> _uploadSession(
+    AgentSession session,
+    List<int> bytes,
+    int done,
+    int total,
+    SyncUploadProgress? onProgress,
+  ) async {
+    final compressed = gzip.encode(bytes);
+    if (compressed.length <= _chunkUploadThreshold) {
+      onProgress?.call(done, total, session, chunkIndex: 1, chunkTotal: 1);
+      return _postJson('/api/upload', {
+        'sessions': [
+          {
+            ..._sessionPayload(session),
+            'fileContentGzipBase64': base64Encode(compressed),
+          },
+        ],
+      });
+    }
+
+    final uploadId =
+        '${session.source.name}-${session.id}-${session.updatedAt.microsecondsSinceEpoch}-${session.relativePath.hashCode}'
+            .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '-');
+    final totalChunks = (compressed.length / _chunkSize).ceil();
+    Map<String, dynamic> decoded = const {};
+    for (var index = 0; index < totalChunks; index++) {
+      onProgress?.call(
+        done,
+        total,
+        session,
+        chunkIndex: index + 1,
+        chunkTotal: totalChunks,
+      );
+      final start = index * _chunkSize;
+      final end = (start + _chunkSize) > compressed.length
+          ? compressed.length
+          : start + _chunkSize;
+      decoded = await _postJson('/api/upload-chunk', {
+        'session': {
+          ..._sessionPayload(session),
+          'uploadId': uploadId,
+          'chunkIndex': index,
+          'chunkTotal': totalChunks,
+          'chunkDataBase64': base64Encode(compressed.sublist(start, end)),
+        },
+      });
+    }
+    return decoded;
+  }
+
+  Map<String, Object?> _sessionPayload(AgentSession session) {
+    return {
+      'source': session.source.name,
+      'sessionId': session.id,
+      'relativePath': session.relativePath,
+      'cwd': session.cwd,
+      'title': session.title,
+      'summary': session.summary,
+      'aiTitle': session.aiTitle ?? '',
+      'aiSummary': session.aiSummary ?? '',
+      'aiTags': session.aiTags,
+      'category': session.category,
+      'updatedAt': session.updatedAt.toUtc().toIso8601String(),
+      'messageCount': session.messageCount,
+    };
+  }
+
+  Future<SyncDownloadResult> download() async {
+    final decoded = await _postJson('/api/download', const {});
+    final rawSessions = decoded['sessions'];
+    final sessions = rawSessions is List
+        ? rawSessions
+              .map(SyncedSession.fromJson)
+              .whereType<SyncedSession>()
+              .toList()
+        : <SyncedSession>[];
+    return SyncDownloadResult(sessions: sessions);
+  }
+
+  Future<Map<String, dynamic>> _postJson(
+    String path,
+    Map<String, Object?> body,
+  ) async {
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await _postJsonOnce(path, body);
+      } on SocketException {
+        if (attempt == 3) {
+          rethrow;
+        }
+        await Future<void>.delayed(Duration(milliseconds: 500 * attempt));
+      } on TimeoutException {
+        if (attempt == 3) {
+          rethrow;
+        }
+        await Future<void>.delayed(Duration(milliseconds: 500 * attempt));
+      }
+    }
+    throw const SocketException('同步请求失败');
+  }
+
+  Future<Map<String, dynamic>> _postJsonOnce(
+    String path,
+    Map<String, Object?> body,
+  ) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    try {
+      final data = utf8.encode(
+        jsonEncode({
+          'account': settings.syncAccount.trim(),
+          'syncKey': settings.syncKey.trim(),
+          'deviceName': Platform.localHostname,
+          ...body,
+        }),
+      );
+      final request = await client
+          .postUrl(_syncUri(settings.syncServerUrl, path))
+          .timeout(const Duration(seconds: 20));
+      request.persistentConnection = false;
+      request.headers.set(
+        HttpHeaders.contentTypeHeader,
+        'application/json; charset=utf-8',
+      );
+      request.headers.set(HttpHeaders.contentLengthHeader, data.length);
+      request.add(data);
+      final response = await request.close().timeout(
+        const Duration(seconds: 120),
+      );
+      final responseBody = await utf8.decodeStream(response);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Exception(
+          'HTTP ${response.statusCode}: ${_clip(responseBody, 260)}',
+        );
+      }
+      final decoded = jsonDecode(responseBody);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      throw const FormatException('同步服务响应不是 JSON 对象');
+    } finally {
+      client.close(force: true);
+    }
+  }
+}
+
+class SyncUploadResult {
+  const SyncUploadResult({
+    required this.sent,
+    required this.updated,
+    required this.skipped,
+  });
+
+  final int sent;
+  final int updated;
+  final int skipped;
+}
+
+class SyncDownloadResult {
+  const SyncDownloadResult({required this.sessions});
+
+  final List<SyncedSession> sessions;
+}
+
+class SyncApplyResult {
+  const SyncApplyResult({required this.written, required this.skipped});
+
+  final int written;
+  final int skipped;
+}
+
+class SyncedSession {
+  const SyncedSession({
+    required this.source,
+    required this.id,
+    required this.relativePath,
+    required this.fileContentBase64,
+    required this.title,
+    required this.summary,
+    required this.aiTitle,
+    required this.aiSummary,
+    required this.aiTags,
+    required this.category,
+  });
+
+  final SessionSource source;
+  final String id;
+  final String relativePath;
+  final String fileContentBase64;
+  final String title;
+  final String summary;
+  final String aiTitle;
+  final String aiSummary;
+  final List<String> aiTags;
+  final String category;
+
+  String get key => '${source.name}:$id:${_joinPath('', relativePath)}';
+
+  static SyncedSession? fromJson(Object? value) {
+    if (value is! Map) {
+      return null;
+    }
+    final sourceName = _stringOrNull(value['source']);
+    final source = switch (sourceName) {
+      'codex' => SessionSource.codex,
+      'claude' => SessionSource.claude,
+      _ => null,
+    };
+    final id = _stringOrNull(value['sessionId']);
+    final relativePath = _stringOrNull(value['relativePath']);
+    final content = _stringOrNull(value['fileContentBase64']);
+    if (source == null ||
+        id == null ||
+        relativePath == null ||
+        content == null) {
+      return null;
+    }
+    final tagsValue = value['aiTags'];
+    final tags = tagsValue is List
+        ? tagsValue
+              .whereType<String>()
+              .map((tag) => tag.trim())
+              .where((tag) => tag.isNotEmpty)
+              .take(8)
+              .toList()
+        : <String>[];
+    return SyncedSession(
+      source: source,
+      id: id,
+      relativePath: relativePath,
+      fileContentBase64: content,
+      title: _stringOrNull(value['title']) ?? '',
+      summary: _stringOrNull(value['summary']) ?? '',
+      aiTitle: _stringOrNull(value['aiTitle']) ?? '',
+      aiSummary: _stringOrNull(value['aiSummary']) ?? '',
+      aiTags: tags,
+      category: _stringOrNull(value['category']) ?? '',
+    );
+  }
+}
+
+class AiCategoryPlan {
+  const AiCategoryPlan({
+    required this.categories,
+    required this.categoryDescriptions,
+    required this.assignments,
+  });
+
+  final List<String> categories;
+  final Map<String, String> categoryDescriptions;
+  final List<AiCategoryAssignment> assignments;
+
+  Map<String, int> get countsByCategory {
+    final result = {for (final category in categories) category: 0};
+    for (final assignment in assignments) {
+      result[assignment.category] = (result[assignment.category] ?? 0) + 1;
+    }
+    return result;
+  }
+
+  List<AiCategoryAssignment> assignmentsFor(String category) {
+    return assignments
+        .where((assignment) => assignment.category == category)
+        .toList(growable: false);
+  }
+
+  static AiCategoryPlan fromExisting(List<AgentSession> sessions) {
+    return AiCategoryPlan(
+      categories: kAiSessionCategories,
+      categoryDescriptions: kAiSessionCategoryDescriptions,
+      assignments: sessions
+          .map(
+            (session) => AiCategoryAssignment(
+              sessionKey: session.key,
+              category: _normalizeAiCategory(session.category),
+              reason: session.category.isEmpty ? '尚未分类，暂放兜底分类。' : '已有分类。',
+            ),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  static AiCategoryPlan fromAiContent(
+    String content,
+    List<AgentSession> sessions, {
+    bool includeMissing = true,
+  }) {
+    final stripped = _stripCodeFence(content);
+    Object? decoded;
+    try {
+      decoded = jsonDecode(stripped);
+    } catch (_) {
+      final match = RegExp(r'\{[\s\S]*\}').firstMatch(stripped);
+      if (match != null) {
+        decoded = jsonDecode(match.group(0)!);
+      }
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const FormatException('AI 分类响应不是 JSON 对象');
+    }
+
+    final descriptions = Map<String, String>.from(
+      kAiSessionCategoryDescriptions,
+    );
+    final rawCategories = decoded['categories'];
+    if (rawCategories is List) {
+      for (final raw in rawCategories) {
+        if (raw is String) {
+          final category = _normalizeAiCategory(raw);
+          descriptions.putIfAbsent(category, () => '');
+        } else if (raw is Map) {
+          final category = _normalizeAiCategory(
+            _stringOrNull(raw['name']) ?? _stringOrNull(raw['category']) ?? '',
+          );
+          final description =
+              _stringOrNull(raw['description']) ??
+              _stringOrNull(raw['overview']) ??
+              _stringOrNull(raw['summary']);
+          if (description != null) {
+            descriptions[category] = _clip(description, 120);
+          }
+        }
+      }
+    }
+
+    final sessionsByRef = <String, AgentSession>{};
+    for (var index = 0; index < sessions.length; index++) {
+      sessionsByRef[_sessionRef(index)] = sessions[index];
+    }
+
+    final bySessionKey = <String, AiCategoryAssignment>{};
+    final rawAssignments = decoded['assignments'];
+    if (rawAssignments is List) {
+      for (final raw in rawAssignments) {
+        if (raw is! Map) {
+          continue;
+        }
+        final ref =
+            _stringOrNull(raw['ref']) ??
+            _stringOrNull(raw['sessionRef']) ??
+            _stringOrNull(raw['id']);
+        if (ref == null) {
+          continue;
+        }
+        final session = sessionsByRef[ref];
+        if (session == null) {
+          continue;
+        }
+        final category = _normalizeAiCategory(
+          _stringOrNull(raw['category']) ?? '',
+        );
+        bySessionKey[session.key] = AiCategoryAssignment(
+          sessionKey: session.key,
+          category: category,
+          reason: _clip(_stringOrNull(raw['reason']) ?? 'AI 自动归类。', 90),
+        );
+      }
+    }
+
+    if (includeMissing) {
+      for (final session in sessions) {
+        bySessionKey.putIfAbsent(
+          session.key,
+          () => AiCategoryAssignment(
+            sessionKey: session.key,
+            category: kFallbackAiCategory,
+            reason: 'AI 未返回分类，已放入兜底分类。',
+          ),
+        );
+      }
+    }
+
+    final assignments = bySessionKey.values.toList(growable: false)
+      ..sort((a, b) {
+        final categoryOrder =
+            kAiSessionCategories.indexOf(a.category) -
+            kAiSessionCategories.indexOf(b.category);
+        if (categoryOrder != 0) {
+          return categoryOrder;
+        }
+        return a.sessionKey.compareTo(b.sessionKey);
+      });
+
+    return AiCategoryPlan(
+      categories: kAiSessionCategories,
+      categoryDescriptions: descriptions,
+      assignments: assignments,
+    );
+  }
+}
+
+class AiCategoryAssignment {
+  const AiCategoryAssignment({
+    required this.sessionKey,
+    required this.category,
+    required this.reason,
+  });
+
+  final String sessionKey;
+  final String category;
+  final String reason;
+}
+
 class OpenAiCompatibleAnalyzer {
   const OpenAiCompatibleAnalyzer(this.settings);
 
   final AppSettings settings;
 
   Future<AiAnalysis> analyze(AgentSession session) async {
+    final content = await _complete(
+      [
+        {
+          'role': 'system',
+          'content':
+              '你是会话整理助手。请用简体中文总结 Codex/Claude 会话，返回严格 JSON：'
+              '{"title":"短标题","projectDescription":"项目/任务是什么，用一句话说明目标和背景",'
+              '"mainFeatures":["功能或需求1","功能或需求2"],'
+              '"contentOverview":"本次会话涉及的核心内容、文件、服务或关键对象，用2到3句概括",'
+              '"conversationHighlights":["用户主要要求或关键对话1","用户主要要求或关键对话2"],'
+              '"progressOverview":"当前完成度、已完成事项、阻塞或下一步，用2到3句概括",'
+              '"tags":["标签"]}。'
+              '内容要简明、直观、偏项目管理视角。不要返回 Markdown 表格。'
+              'mainFeatures 和 conversationHighlights 各最多 5 条。',
+        },
+        {'role': 'user', 'content': session.promptContext},
+      ],
+      maxTokens: 700,
+      timeout: const Duration(seconds: 90),
+    );
+    return _parseAiAnalysis(content, session);
+  }
+
+  Future<AiCategoryPlan> classifySessions(
+    List<AgentSession> sessions, {
+    required bool fullRefresh,
+  }) async {
+    if (sessions.isEmpty) {
+      return const AiCategoryPlan(
+        categories: kAiSessionCategories,
+        categoryDescriptions: kAiSessionCategoryDescriptions,
+        assignments: [],
+      );
+    }
+    final content = await _complete(
+      [
+        {
+          'role': 'system',
+          'content':
+              '你是会话分类架构师。请把 Codex/Claude 会话归入固定分类，返回严格 JSON。'
+              '只能使用给定分类，不要新增、改名或删除分类。'
+              '返回格式：{"categories":[{"name":"分类名","description":"分类说明"}],'
+              '"assignments":[{"ref":"S001","category":"分类名","reason":"不超过30字的归类理由"}]}。'
+              '必须为用户提供的每个 ref 返回一条 assignments。'
+              '初始问候、模型不可用、登录测试、占位、中断、无明确任务的会话归入“测试/无效/其它”。'
+              '如果不确定，也归入“测试/无效/其它”。不要返回 Markdown。',
+        },
+        {
+          'role': 'user',
+          'content': _categoryPrompt(sessions, fullRefresh: fullRefresh),
+        },
+      ],
+      maxTokens: 6000,
+      timeout: const Duration(seconds: 180),
+    );
+    return AiCategoryPlan.fromAiContent(content, sessions);
+  }
+
+  Future<String> _complete(
+    List<Map<String, String>> messages, {
+    required int maxTokens,
+    required Duration timeout,
+  }) async {
     final uri = _chatCompletionsUri(settings.baseUrl);
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 15);
@@ -2294,35 +3567,45 @@ class OpenAiCompatibleAnalyzer {
           'model': settings.model.trim().isEmpty
               ? 'deepseek-chat'
               : settings.model.trim(),
-          'temperature': 0.2,
-          'max_tokens': 700,
-          'messages': [
-            {
-              'role': 'system',
-              'content':
-                  '你是会话整理助手。请用简体中文总结 Codex/Claude 会话，返回严格 JSON：'
-                  '{"title":"短标题","projectDescription":"项目描述，用一小段说明目标和背景",'
-                  '"mainFeatures":["主要功能1","主要功能2"],'
-                  '"progressOverview":"进度概览，用一小段说明已完成、当前状态和待办",'
-                  '"tags":["标签"]}。'
-                  '内容要简明清晰。不要返回 Markdown 表格。mainFeatures 最多 5 条。',
-            },
-            {'role': 'user', 'content': session.promptContext},
-          ],
+          'temperature': 0.1,
+          'max_tokens': maxTokens,
+          'messages': messages,
         }),
       );
-      final response = await request.close().timeout(
-        const Duration(seconds: 90),
-      );
+      final response = await request.close().timeout(timeout);
       final body = await utf8.decodeStream(response);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         throw Exception('HTTP ${response.statusCode}: ${_clip(body, 240)}');
       }
-      final content = extractAiMessage(jsonDecode(body));
-      return _parseAiAnalysis(content, session);
+      return extractAiMessage(jsonDecode(body));
     } finally {
       client.close(force: true);
     }
+  }
+
+  String _categoryPrompt(
+    List<AgentSession> sessions, {
+    required bool fullRefresh,
+  }) {
+    final buffer = StringBuffer()
+      ..writeln(fullRefresh ? '模式：首次全量分类' : '模式：增量分类')
+      ..writeln('会话数量：${sessions.length}')
+      ..writeln()
+      ..writeln('固定分类：');
+    for (final category in kAiSessionCategories) {
+      buffer.writeln(
+        '- $category：${kAiSessionCategoryDescriptions[category] ?? ''}',
+      );
+    }
+    buffer
+      ..writeln()
+      ..writeln('会话清单：');
+    for (var index = 0; index < sessions.length; index++) {
+      buffer
+        ..writeln()
+        ..writeln(sessions[index].categoryContext(_sessionRef(index)));
+    }
+    return _clip(buffer.toString(), 90000);
   }
 
   static String extractAiMessage(Object? decoded) {
@@ -2428,8 +3711,22 @@ class OpenAiCompatibleAnalyzer {
               .take(5)
               .toList()
         : <String>[];
+    final contentOverview = _stringOrNull(decoded['contentOverview']);
+    final highlightsValue = decoded['conversationHighlights'];
+    final highlights = highlightsValue is List
+        ? highlightsValue
+              .whereType<String>()
+              .map((highlight) => highlight.trim())
+              .where((highlight) => highlight.isNotEmpty)
+              .take(5)
+              .toList()
+        : <String>[];
     final progress = _stringOrNull(decoded['progressOverview']);
-    if (description == null && features.isEmpty && progress == null) {
+    if (description == null &&
+        features.isEmpty &&
+        contentOverview == null &&
+        highlights.isEmpty &&
+        progress == null) {
       return null;
     }
 
@@ -2439,6 +3736,14 @@ class OpenAiCompatibleAnalyzer {
     }
     if (features.isNotEmpty) {
       parts.add('主要功能：\n${features.map((feature) => '- $feature').join('\n')}');
+    }
+    if (contentOverview != null) {
+      parts.add('内容概要：\n$contentOverview');
+    }
+    if (highlights.isNotEmpty) {
+      parts.add(
+        '主要对话摘要：\n${highlights.map((highlight) => '- $highlight').join('\n')}',
+      );
     }
     if (progress != null) {
       parts.add('进度概览：\n$progress');
@@ -2466,6 +3771,43 @@ Uri _chatCompletionsUri(String rawBaseUrl) {
       ? '${base.path}/chat/completions'
       : '${base.path}/v1/chat/completions';
   return base.replace(path: path);
+}
+
+Uri _syncUri(String rawBaseUrl, String apiPath) {
+  final clean = rawBaseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+  final base = Uri.parse(clean.isEmpty ? 'http://127.0.0.1:18080' : clean);
+  final basePath = base.path.replaceFirst(RegExp(r'/+$'), '');
+  return base.replace(path: '$basePath$apiPath');
+}
+
+int _intValue(Object? value) {
+  if (value is int) {
+    return value;
+  }
+  if (value is num) {
+    return value.toInt();
+  }
+  if (value is String) {
+    return int.tryParse(value) ?? 0;
+  }
+  return 0;
+}
+
+bool _hasStableAiCategories(List<String> categories) {
+  final current = categories.map((category) => category.trim()).toSet();
+  return kAiSessionCategories.every(current.contains);
+}
+
+String _sessionRef(int index) {
+  return 'S${(index + 1).toString().padLeft(3, '0')}';
+}
+
+String _normalizeAiCategory(String category) {
+  final clean = category.trim();
+  if (kAiSessionCategories.contains(clean)) {
+    return clean;
+  }
+  return kFallbackAiCategory;
 }
 
 List<ChatTurn> _dedupeTurns(List<ChatTurn> turns) {
@@ -2629,6 +3971,49 @@ String _basenameWithoutExtension(String path) {
 }
 
 String _basename(String path) => path.split(RegExp(r'[\\/]')).last;
+
+String _relativePath(String root, String path) {
+  final normalizedRoot = root
+      .replaceAll('/', '\\')
+      .replaceFirst(RegExp(r'\\+$'), '');
+  final normalizedPath = path.replaceAll('/', '\\');
+  final rootLower = normalizedRoot.toLowerCase();
+  final pathLower = normalizedPath.toLowerCase();
+  if (pathLower == rootLower) {
+    return _basename(normalizedPath);
+  }
+  if (pathLower.startsWith('$rootLower\\')) {
+    return normalizedPath.substring(normalizedRoot.length + 1);
+  }
+  return _basename(normalizedPath);
+}
+
+String _joinPath(String root, String relativePath) {
+  final cleanRoot = root
+      .replaceAll('/', '\\')
+      .replaceFirst(RegExp(r'\\+$'), '');
+  final cleanRelative = relativePath
+      .replaceAll('/', '\\')
+      .replaceFirst(RegExp(r'^\\+'), '');
+  if (cleanRoot.isEmpty) {
+    return cleanRelative;
+  }
+  return '$cleanRoot\\$cleanRelative';
+}
+
+String? _safeRelativePath(String relativePath) {
+  final normalized = relativePath.replaceAll('/', '\\').trim();
+  if (normalized.isEmpty ||
+      normalized.startsWith('\\') ||
+      RegExp(r'^[a-zA-Z]:\\').hasMatch(normalized)) {
+    return null;
+  }
+  final parts = normalized.split('\\');
+  if (parts.any((part) => part.isEmpty || part == '.' || part == '..')) {
+    return null;
+  }
+  return normalized;
+}
 
 String _timestampForFile(DateTime dateTime) {
   String two(int value) => value.toString().padLeft(2, '0');
