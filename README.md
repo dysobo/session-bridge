@@ -13,6 +13,7 @@ build\windows\x64\runner\Release\session_bridge.exe
 ## 功能
 
 - 自动扫描 `%USERPROFILE%\.codex\sessions` 和 `%USERPROFILE%\.claude\projects`。
+- Qmby 风格工作台界面，左侧集中放置常用操作，主区展示搜索、筛选、列表和详情。
 - 列表展示会话来源、更新时间、工作目录、主要内容和关键消息。
 - 点击“恢复”会先弹出可编辑命令确认框，确认后再打开 PowerShell 执行。
 - 点击“全部 AI 分析”会顺序分析全部会话，并把结果保存到本地设置。
@@ -22,14 +23,15 @@ build\windows\x64\runner\Release\session_bridge.exe
 - 支持分类管理、按分类筛选、给单个会话归类。
 - 支持删除会话；删除时会把原始 JSONL 移到 `%APPDATA%\SessionBridge\deleted-sessions`。
 - 支持配置同步服务器、账号和同步密钥，手动上传/下载同步 Codex/Claude 原始会话文件、AI 摘要和分类。
-- 上传同步会按会话分批上传，并压缩原始 JSONL，避免大量历史会话一次性上传失败。
+- 上传同步会按会话分块上传，并压缩原始 JSONL，避免大量历史会话一次性上传失败。
+- 下载同步会先拉取轻量列表，再按会话分块下载原始 JSONL，避免大响应导致恢复失败。
 - 设置中可修改会话目录、OpenAI 兼容 Base URL、API Key 和模型名。
 - 设置中可选择恢复参数：Codex 追加 `--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=xhigh`，Claude 追加 `--dangerously-skip-permissions`。
-- 默认预配置本机 OpenAI 兼容服务地址，不预设 API Key；首次使用 AI 分析前需要在设置中填写。
+- 默认使用本机 OpenAI 兼容服务地址，不预设 API Key；首次使用 AI 分析前需要在设置中填写。
 
 ## 同步服务
 
-内置的 `sync_server/session_bridge_sync_server.py` 可部署到 rcy-ecs，默认监听 `18080`，使用 SQLite 保存结构化会话数据。
+内置的 `sync_server/session_bridge_sync_server.py` 可部署到自有服务器，默认监听 `18080`，使用 SQLite 保存结构化会话数据。
 
 客户端不预设同步服务器地址。同步服务器、账号和同步密钥需要在设置中手动填写。
 
@@ -45,7 +47,10 @@ build\windows\x64\runner\Release\session_bridge.exe
 
 - `GET /api/health`
 - `POST /api/upload`
+- `POST /api/upload-chunk`
 - `POST /api/download`
+- `POST /api/download-list`
+- `POST /api/download-chunk`
 
 ## 开发命令
 

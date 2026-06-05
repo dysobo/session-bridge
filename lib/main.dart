@@ -4,6 +4,28 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
+const Color qmBg = Color(0xFFF5F8FA);
+const Color qmSurface = Color(0xA0FFFFFF);
+const Color qmSurfaceStrong = Color(0xD6FFFFFF);
+const Color qmText = Color(0xFF1A222E);
+const Color qmMuted = Color(0xFF627084);
+const Color qmBorder = Color(0xFFD8E1E8);
+const Color qmPrimary = Color(0xFF0FA2E6);
+const Color qmTeal = Color(0xFF09C3AD);
+const Color qmSuccess = Color(0xFF61C832);
+const Color qmWarning = Color(0xFFF59F0A);
+
+const LinearGradient qmPageGradient = LinearGradient(
+  begin: Alignment.topLeft,
+  end: Alignment.bottomRight,
+  colors: [Color(0xFFE8F8FF), qmBg, Color(0xFFF7FBFD), Color(0xFFFFF8E6)],
+  stops: [0, 0.44, 0.72, 1],
+);
+
+const List<BoxShadow> qmShadow = [
+  BoxShadow(color: Color(0x120F172A), blurRadius: 24, offset: Offset(0, 8)),
+];
+
 const List<String> kAiSessionCategories = [
   '会话管理与 AI 助手工具',
   'AI 网关、模型与接口服务',
@@ -45,6 +67,15 @@ typedef SyncUploadProgress =
       int? chunkTotal,
     });
 
+typedef SyncDownloadProgress =
+    void Function(
+      int done,
+      int total,
+      SyncedSession session, {
+      int? chunkIndex,
+      int? chunkTotal,
+    });
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const SessionBridgeApp());
@@ -60,12 +91,52 @@ class SessionBridgeApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF0F766E),
-          brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF6F7F8),
+        colorScheme:
+            ColorScheme.fromSeed(
+              seedColor: qmPrimary,
+              brightness: Brightness.light,
+            ).copyWith(
+              primary: qmPrimary,
+              secondary: qmTeal,
+              surface: qmSurfaceStrong,
+              onSurface: qmText,
+            ),
+        scaffoldBackgroundColor: qmBg,
         visualDensity: VisualDensity.compact,
+        textTheme: ThemeData.light().textTheme.apply(
+          bodyColor: qmText,
+          displayColor: qmText,
+        ),
+        dividerTheme: const DividerThemeData(color: qmBorder, thickness: 1),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: qmSurfaceStrong,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: qmBorder),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: qmBorder),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: qmPrimary, width: 1.4),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          backgroundColor: qmSurfaceStrong,
+          selectedColor: qmTeal.withAlpha(28),
+          labelStyle: const TextStyle(color: qmText),
+          secondaryLabelStyle: const TextStyle(
+            color: qmTeal,
+            fontWeight: FontWeight.w700,
+          ),
+          shape: RoundedRectangleBorder(
+            side: const BorderSide(color: qmBorder),
+            borderRadius: BorderRadius.circular(8),
+          ),
+        ),
       ),
       home: const SessionHomePage(),
     );
@@ -535,7 +606,18 @@ class _SessionHomePageState extends State<SessionHomePage> {
       _status = '正在下载同步数据...';
     });
     try {
-      final result = await SessionSyncClient(_settings).download();
+      final result = await SessionSyncClient(_settings).download(
+        onProgress: (done, total, session, {chunkIndex, chunkTotal}) {
+          setState(() {
+            if (chunkIndex != null && chunkTotal != null) {
+              _status =
+                  '正在下载同步数据：${done + 1}/$total ${session.titleOrId}（分块 $chunkIndex/$chunkTotal）';
+            } else {
+              _status = '正在下载同步数据：$done/$total ${session.titleOrId}';
+            }
+          });
+        },
+      );
       final applyResult = await _applyDownloadedSessions(result.sessions);
       final status =
           '下载同步完成：远端 ${result.sessions.length} 个，写入 ${applyResult.written} 个，跳过 ${applyResult.skipped} 个。';
@@ -643,109 +725,473 @@ class _SessionHomePageState extends State<SessionHomePage> {
         .where((session) => session.source == SessionSource.codex)
         .length;
     final claudeCount = _sessions.length - codexCount;
+    final shellActions = [
+      _ShellAction(
+        label: _analyzingAll ? '$_analysisDone/$_analysisTotal' : '全部 AI 分析',
+        icon: _analyzingAll
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.auto_awesome),
+        onPressed: _loading || _analyzingAll || _syncing
+            ? null
+            : _analyzeAllVisible,
+        primary: true,
+      ),
+      _ShellAction(
+        label: 'AI 分类整理',
+        icon: const Icon(Icons.account_tree_outlined),
+        onPressed: _loading || _analyzingAll || _syncing
+            ? null
+            : _showAiCategoryOrganizer,
+      ),
+      _ShellAction(
+        label: '上传同步',
+        icon: _syncing
+            ? const SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.cloud_upload_outlined),
+        onPressed: _loading || _syncing ? null : _uploadSync,
+      ),
+      _ShellAction(
+        label: '下载同步',
+        icon: const Icon(Icons.cloud_download_outlined),
+        onPressed: _loading || _syncing ? null : _downloadSync,
+      ),
+      _ShellAction(
+        label: '分类管理',
+        icon: const Icon(Icons.label_outline),
+        onPressed: _showCategoryManager,
+      ),
+      _ShellAction(
+        label: '刷新',
+        icon: const Icon(Icons.refresh),
+        onPressed: _loading ? null : _load,
+      ),
+      _ShellAction(
+        label: '设置',
+        icon: const Icon(Icons.settings_outlined),
+        onPressed: _showSettings,
+      ),
+    ];
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Session Bridge'),
-        actions: [
-          TextButton.icon(
-            onPressed: _loading || _analyzingAll || _syncing
-                ? null
-                : _analyzeAllVisible,
-            icon: _analyzingAll
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.auto_awesome),
-            label: Text(
-              _analyzingAll ? '$_analysisDone/$_analysisTotal' : '全部 AI 分析',
-            ),
+      body: Container(
+        decoration: const BoxDecoration(gradient: qmPageGradient),
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final wide = constraints.maxWidth >= 1040;
+              final main = _QmWorkspace(
+                actions: wide ? const <_ShellAction>[] : shellActions,
+                totalCount: _sessions.length,
+                codexCount: codexCount,
+                claudeCount: claudeCount,
+                toolbar: _Toolbar(
+                  query: _query,
+                  filter: _filter,
+                  totalCount: _sessions.length,
+                  codexCount: codexCount,
+                  claudeCount: claudeCount,
+                  categories: _settings.categories,
+                  categoryFilter: _categoryFilter,
+                  onQueryChanged: (value) => setState(() => _query = value),
+                  onFilterChanged: (value) => setState(() => _filter = value),
+                  onCategoryFilterChanged: (value) =>
+                      setState(() => _categoryFilter = value),
+                ),
+                status: _status == null
+                    ? null
+                    : _StatusStrip(
+                        text: _status!,
+                        onClose: () => setState(() => _status = null),
+                      ),
+                body: _BodyLayout(
+                  loading: _loading,
+                  error: _error,
+                  sessions: visibleSessions,
+                  selected: _selected,
+                  analyzing: _analyzing || _analyzingAll,
+                  categories: _settings.categories,
+                  onSelect: (session) => setState(() => _selected = session),
+                  onRestore: _restore,
+                  onAnalyze: _analyzeSelected,
+                  onDelete: _deleteSession,
+                  onSetCategory: _setCategory,
+                  onManageCategories: _showCategoryManager,
+                  onRefresh: _load,
+                  onSettings: _showSettings,
+                ),
+              );
+              if (!wide) {
+                return Padding(padding: const EdgeInsets.all(12), child: main);
+              }
+              return Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _QmSidebar(
+                      actions: shellActions,
+                      totalCount: _sessions.length,
+                      codexCount: codexCount,
+                      claudeCount: claudeCount,
+                    ),
+                    const SizedBox(width: 24),
+                    Expanded(child: main),
+                  ],
+                ),
+              );
+            },
           ),
-          TextButton.icon(
-            onPressed: _loading || _analyzingAll || _syncing
-                ? null
-                : _showAiCategoryOrganizer,
-            icon: const Icon(Icons.account_tree_outlined),
-            label: const Text('AI 分类整理'),
-          ),
-          TextButton.icon(
-            onPressed: _loading || _syncing ? null : _uploadSync,
-            icon: _syncing
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.cloud_upload_outlined),
-            label: const Text('上传同步'),
-          ),
-          TextButton.icon(
-            onPressed: _loading || _syncing ? null : _downloadSync,
-            icon: const Icon(Icons.cloud_download_outlined),
-            label: const Text('下载同步'),
-          ),
-          IconButton(
-            tooltip: '分类管理',
-            onPressed: _showCategoryManager,
-            icon: const Icon(Icons.label_outline),
-          ),
-          IconButton(
-            tooltip: '刷新',
-            onPressed: _loading ? null : _load,
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: '设置',
-            onPressed: _showSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-          const SizedBox(width: 8),
-        ],
+        ),
       ),
-      body: Column(
-        children: [
-          _Toolbar(
-            query: _query,
-            filter: _filter,
-            totalCount: _sessions.length,
-            codexCount: codexCount,
-            claudeCount: claudeCount,
-            categories: _settings.categories,
-            categoryFilter: _categoryFilter,
-            onQueryChanged: (value) => setState(() => _query = value),
-            onFilterChanged: (value) => setState(() => _filter = value),
-            onCategoryFilterChanged: (value) =>
-                setState(() => _categoryFilter = value),
+    );
+  }
+}
+
+class _ShellAction {
+  const _ShellAction({
+    required this.label,
+    required this.icon,
+    required this.onPressed,
+    this.primary = false,
+  });
+
+  final String label;
+  final Widget icon;
+  final VoidCallback? onPressed;
+  final bool primary;
+}
+
+class _QmWorkspace extends StatelessWidget {
+  const _QmWorkspace({
+    required this.actions,
+    required this.totalCount,
+    required this.codexCount,
+    required this.claudeCount,
+    required this.toolbar,
+    required this.status,
+    required this.body,
+  });
+
+  final List<_ShellAction> actions;
+  final int totalCount;
+  final int codexCount;
+  final int claudeCount;
+  final Widget toolbar;
+  final Widget? status;
+  final Widget body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _QmPageHeader(
+          actions: actions,
+          totalCount: totalCount,
+          codexCount: codexCount,
+          claudeCount: claudeCount,
+        ),
+        const SizedBox(height: 14),
+        toolbar,
+        if (status != null) ...[const SizedBox(height: 10), status!],
+        const SizedBox(height: 12),
+        Expanded(
+          child: Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: _qmPanelDecoration(),
+            child: body,
           ),
-          if (_status != null)
-            _StatusStrip(
-              text: _status!,
-              onClose: () => setState(() => _status = null),
-            ),
-          Expanded(
-            child: _BodyLayout(
-              loading: _loading,
-              error: _error,
-              sessions: visibleSessions,
-              selected: _selected,
-              analyzing: _analyzing || _analyzingAll,
-              categories: _settings.categories,
-              onSelect: (session) => setState(() => _selected = session),
-              onRestore: _restore,
-              onAnalyze: _analyzeSelected,
-              onDelete: _deleteSession,
-              onSetCategory: _setCategory,
-              onManageCategories: _showCategoryManager,
-              onRefresh: _load,
-              onSettings: _showSettings,
-            ),
+        ),
+      ],
+    );
+  }
+}
+
+class _QmPageHeader extends StatelessWidget {
+  const _QmPageHeader({
+    required this.actions,
+    required this.totalCount,
+    required this.codexCount,
+    required this.claudeCount,
+  });
+
+  final List<_ShellAction> actions;
+  final int totalCount;
+  final int codexCount;
+  final int claudeCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final stats = Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        _QmStatPill(label: '全部', value: totalCount.toString()),
+        _QmStatPill(label: 'Codex', value: codexCount.toString()),
+        _QmStatPill(label: 'Claude', value: claudeCount.toString()),
+      ],
+    );
+    final title = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Session Bridge',
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w800,
+            color: qmText,
+          ),
+        ),
+        const SizedBox(height: 8),
+        stats,
+      ],
+    );
+    if (actions.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.only(bottom: 12),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: qmBorder)),
+        ),
+        child: title,
+      );
+    }
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.only(bottom: 12),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: qmBorder)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          title,
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: actions
+                .map((action) => _CompactShellButton(action: action))
+                .toList(),
           ),
         ],
       ),
     );
   }
+}
+
+class _QmSidebar extends StatelessWidget {
+  const _QmSidebar({
+    required this.actions,
+    required this.totalCount,
+    required this.codexCount,
+    required this.claudeCount,
+  });
+
+  final List<_ShellAction> actions;
+  final int totalCount;
+  final int codexCount;
+  final int claudeCount;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 181,
+      child: Container(
+        decoration: _qmPanelDecoration(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 18, 16, 16),
+              child: Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: qmPrimary.withAlpha(24),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Icon(
+                      Icons.hub_outlined,
+                      color: qmPrimary,
+                      size: 19,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Bridge',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        color: qmPrimary,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+              child: Text(
+                '操作',
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: qmMuted,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            Expanded(
+              child: ListView.separated(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                itemCount: actions.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 5),
+                itemBuilder: (context, index) {
+                  return _SidebarShellButton(action: actions[index]);
+                },
+              ),
+            ),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: const BoxDecoration(
+                border: Border(top: BorderSide(color: qmBorder)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _QmStatPill(label: '全部', value: totalCount.toString()),
+                  const SizedBox(height: 8),
+                  _QmStatPill(label: 'Codex', value: codexCount.toString()),
+                  const SizedBox(height: 8),
+                  _QmStatPill(label: 'Claude', value: claudeCount.toString()),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SidebarShellButton extends StatelessWidget {
+  const _SidebarShellButton({required this.action});
+
+  final _ShellAction action;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = action.onPressed != null;
+    final active = action.primary && enabled;
+    final color = !enabled
+        ? qmMuted.withAlpha(105)
+        : (active ? qmTeal : qmMuted);
+    return Material(
+      color: active ? qmTeal.withAlpha(28) : Colors.transparent,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: action.onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+          child: IconTheme(
+            data: IconThemeData(color: color, size: 18),
+            child: DefaultTextStyle(
+              style: Theme.of(context).textTheme.labelLarge!.copyWith(
+                color: color,
+                fontWeight: FontWeight.w700,
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: Center(child: action.icon),
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      action.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CompactShellButton extends StatelessWidget {
+  const _CompactShellButton({required this.action});
+
+  final _ShellAction action;
+
+  @override
+  Widget build(BuildContext context) {
+    if (action.primary) {
+      return FilledButton.tonalIcon(
+        onPressed: action.onPressed,
+        icon: action.icon,
+        label: Text(action.label),
+      );
+    }
+    return OutlinedButton.icon(
+      onPressed: action.onPressed,
+      icon: action.icon,
+      label: Text(action.label),
+    );
+  }
+}
+
+class _QmStatPill extends StatelessWidget {
+  const _QmStatPill({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: qmSuccess.withAlpha(30),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$label $value',
+        style: const TextStyle(
+          color: qmSuccess,
+          fontWeight: FontWeight.w800,
+          fontSize: 12,
+        ),
+      ),
+    );
+  }
+}
+
+BoxDecoration _qmPanelDecoration() {
+  return BoxDecoration(
+    color: qmSurface,
+    border: Border.all(color: qmBorder.withAlpha(160)),
+    borderRadius: BorderRadius.circular(12),
+    boxShadow: qmShadow,
+  );
 }
 
 class _Toolbar extends StatefulWidget {
@@ -806,8 +1252,8 @@ class _ToolbarState extends State<_Toolbar> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-      color: Theme.of(context).colorScheme.surface,
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: _qmPanelDecoration(),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 980;
@@ -820,7 +1266,6 @@ class _ToolbarState extends State<_Toolbar> {
                 isDense: true,
                 prefixIcon: Icon(Icons.search),
                 hintText: '搜索会话、目录或内容',
-                border: OutlineInputBorder(),
               ),
             ),
           );
@@ -871,13 +1316,21 @@ class _ToolbarState extends State<_Toolbar> {
           final hint = Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.bolt_outlined, size: 18),
+              const Icon(Icons.bolt_outlined, size: 18, color: qmPrimary),
               const SizedBox(width: 6),
               Text(
                 'AI 摘要可在详情页按需生成',
-                style: Theme.of(context).textTheme.bodySmall,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: qmMuted),
               ),
             ],
+          );
+          final categoryScroller = ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: compact ? 150 : 92),
+            child: Scrollbar(
+              child: SingleChildScrollView(child: categoryFilters),
+            ),
           );
           if (compact) {
             return Column(
@@ -887,7 +1340,7 @@ class _ToolbarState extends State<_Toolbar> {
                 const SizedBox(height: 10),
                 sourceFilters,
                 const SizedBox(height: 10),
-                categoryFilters,
+                categoryScroller,
                 const SizedBox(height: 8),
                 hint,
               ],
@@ -907,7 +1360,7 @@ class _ToolbarState extends State<_Toolbar> {
                 ],
               ),
               const SizedBox(height: 10),
-              categoryFilters,
+              categoryScroller,
             ],
           );
         },
@@ -926,14 +1379,23 @@ class _StatusStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      color: const Color(0xFFEFF6FF),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: BoxDecoration(
+        color: qmPrimary.withAlpha(24),
+        border: Border.all(color: qmPrimary.withAlpha(70)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       child: Row(
         children: [
-          const Icon(Icons.info_outline, size: 18, color: Color(0xFF1D4ED8)),
+          const Icon(Icons.info_outline, size: 18, color: qmPrimary),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(text, maxLines: 2, overflow: TextOverflow.ellipsis),
+            child: Text(
+              text,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: qmText),
+            ),
           ),
           IconButton(
             tooltip: '关闭',
@@ -1107,20 +1569,21 @@ class SessionListItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return Material(
-      color: selected ? scheme.secondaryContainer : scheme.surface,
-      borderRadius: BorderRadius.circular(8),
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
       child: InkWell(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(12),
         onTap: onTap,
         child: Container(
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
+            color: selected ? qmTeal.withAlpha(28) : qmSurfaceStrong,
+            borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: selected ? scheme.primary : const Color(0xFFE5E7EB),
+              color: selected ? qmTeal.withAlpha(130) : qmBorder,
             ),
+            boxShadow: selected ? qmShadow : const [],
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1374,9 +1837,7 @@ class SourceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = source == SessionSource.codex
-        ? const Color(0xFF0F766E)
-        : const Color(0xFFB45309);
+    final color = source == SessionSource.codex ? qmPrimary : qmWarning;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
@@ -1404,20 +1865,20 @@ class CategoryChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 180),
+      constraints: const BoxConstraints(maxWidth: 260),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
         decoration: BoxDecoration(
-          color: const Color(0xFFEFF6FF),
-          border: Border.all(color: const Color(0xFFBFDBFE)),
-          borderRadius: BorderRadius.circular(6),
+          color: qmPrimary.withAlpha(24),
+          border: Border.all(color: qmPrimary.withAlpha(75)),
+          borderRadius: BorderRadius.circular(8),
         ),
         child: Text(
           text,
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
-            color: Color(0xFF1D4ED8),
+            color: qmPrimary,
             fontWeight: FontWeight.w700,
             fontSize: 12,
           ),
@@ -1439,9 +1900,9 @@ class InfoPill extends StatelessWidget {
       constraints: const BoxConstraints(maxWidth: 360),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xFFE5E7EB)),
-        borderRadius: BorderRadius.circular(6),
+        color: qmSurfaceStrong,
+        border: Border.all(color: qmBorder),
+        borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1516,9 +1977,9 @@ class _TurnBlock extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: isUser ? const Color(0xFFF0FDFA) : Colors.white,
-        border: Border.all(color: const Color(0xFFE5E7EB)),
-        borderRadius: BorderRadius.circular(8),
+        color: isUser ? qmTeal.withAlpha(20) : qmSurfaceStrong,
+        border: Border.all(color: isUser ? qmTeal.withAlpha(70) : qmBorder),
+        borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1527,7 +1988,7 @@ class _TurnBlock extends StatelessWidget {
             isUser ? '用户' : turn.roleLabel,
             style: TextStyle(
               fontWeight: FontWeight.w700,
-              color: isUser ? const Color(0xFF0F766E) : const Color(0xFF374151),
+              color: isUser ? qmTeal : qmMuted,
             ),
           ),
           const SizedBox(height: 6),
@@ -1566,7 +2027,7 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 48, color: const Color(0xFF6B7280)),
+            Icon(icon, size: 48, color: qmMuted),
             const SizedBox(height: 12),
             Text(
               title,
@@ -2412,7 +2873,7 @@ class AppSettings {
     return AppSettings(
       codexRoot: '$home\\.codex\\sessions',
       claudeRoot: '$home\\.claude\\projects',
-      baseUrl: 'http://192.168.0.16:3001/',
+      baseUrl: 'http://127.0.0.1:3001/',
       apiKey: '',
       model: 'deepseek-chat',
       syncServerUrl: '',
@@ -3040,6 +3501,7 @@ class SessionSyncClient {
   final AppSettings settings;
   static const int _chunkUploadThreshold = 512 * 1024;
   static const int _chunkSize = 256 * 1024;
+  static const int _downloadChunkSize = 256 * 1024;
 
   Future<SyncUploadResult> upload(
     List<AgentSession> sessions, {
@@ -3142,7 +3604,47 @@ class SessionSyncClient {
     };
   }
 
-  Future<SyncDownloadResult> download() async {
+  Future<SyncDownloadResult> download({
+    SyncDownloadProgress? onProgress,
+  }) async {
+    Map<String, dynamic> decoded;
+    try {
+      decoded = await _postJson('/api/download-list', const {});
+    } catch (error) {
+      if (!_shouldUseLegacyDownload(error)) {
+        rethrow;
+      }
+      return _downloadLegacy(onProgress: onProgress);
+    }
+    final rawSessions = decoded['sessions'];
+    final metadata = rawSessions is List
+        ? rawSessions
+              .map(
+                (value) => SyncedSession.fromJson(value, requireContent: false),
+              )
+              .whereType<SyncedSession>()
+              .toList()
+        : <SyncedSession>[];
+    final sessions = <SyncedSession>[];
+    final total = metadata.length;
+    for (var index = 0; index < total; index++) {
+      final session = metadata[index];
+      final content = await _downloadSessionContent(
+        session,
+        index,
+        total,
+        onProgress,
+      );
+      final completed = session.withFileContent(content);
+      sessions.add(completed);
+      onProgress?.call(index + 1, total, completed);
+    }
+    return SyncDownloadResult(sessions: sessions);
+  }
+
+  Future<SyncDownloadResult> _downloadLegacy({
+    SyncDownloadProgress? onProgress,
+  }) async {
     final decoded = await _postJson('/api/download', const {});
     final rawSessions = decoded['sessions'];
     final sessions = rawSessions is List
@@ -3151,7 +3653,70 @@ class SessionSyncClient {
               .whereType<SyncedSession>()
               .toList()
         : <SyncedSession>[];
+    for (var index = 0; index < sessions.length; index++) {
+      onProgress?.call(index + 1, sessions.length, sessions[index]);
+    }
     return SyncDownloadResult(sessions: sessions);
+  }
+
+  Future<String> _downloadSessionContent(
+    SyncedSession session,
+    int done,
+    int total,
+    SyncDownloadProgress? onProgress,
+  ) async {
+    final expectedLength = session.contentBase64Length;
+    final chunkTotal = (expectedLength <= 0)
+        ? 1
+        : (expectedLength / _downloadChunkSize).ceil();
+    final chunks = <String>[];
+    var offset = 0;
+    var complete = false;
+    do {
+      final chunkIndex = (offset / _downloadChunkSize).floor() + 1;
+      final displayChunkIndex = chunkIndex > chunkTotal
+          ? chunkTotal
+          : chunkIndex;
+      onProgress?.call(
+        done,
+        total,
+        session,
+        chunkIndex: displayChunkIndex,
+        chunkTotal: chunkTotal,
+      );
+      final decoded = await _postJson('/api/download-chunk', {
+        'session': {
+          'source': session.source.name,
+          'sessionId': session.id,
+          'relativePath': session.relativePath,
+          'offset': offset,
+          'length': _downloadChunkSize,
+        },
+      });
+      final chunk = _stringOrNull(decoded['chunkBase64']) ?? '';
+      final responseOffset = _intValue(decoded['offset']);
+      final nextOffset = _intValue(decoded['nextOffset']);
+      complete = decoded['complete'] == true;
+      if (responseOffset != offset) {
+        throw FormatException('下载分块偏移不一致：${session.titleOrId}');
+      }
+      if (nextOffset < offset || (nextOffset == offset && !complete)) {
+        throw FormatException('下载分块没有推进：${session.titleOrId}');
+      }
+      chunks.add(chunk);
+      offset = nextOffset;
+    } while (!complete);
+
+    final content = chunks.join();
+    if (expectedLength > 0 && content.length != expectedLength) {
+      throw FormatException('下载内容长度不一致：${session.titleOrId}');
+    }
+    return content;
+  }
+
+  bool _shouldUseLegacyDownload(Object error) {
+    final text = error.toString();
+    return text.contains('HTTP 404') || text.contains('not found');
   }
 
   Future<Map<String, dynamic>> _postJson(
@@ -3251,13 +3816,15 @@ class SyncedSession {
     required this.source,
     required this.id,
     required this.relativePath,
-    required this.fileContentBase64,
+    this.fileContentBase64 = '',
     required this.title,
     required this.summary,
     required this.aiTitle,
     required this.aiSummary,
     required this.aiTags,
     required this.category,
+    this.fileSha256 = '',
+    this.contentBase64Length = 0,
   });
 
   final SessionSource source;
@@ -3270,10 +3837,30 @@ class SyncedSession {
   final String aiSummary;
   final List<String> aiTags;
   final String category;
+  final String fileSha256;
+  final int contentBase64Length;
 
   String get key => '${source.name}:$id:${_joinPath('', relativePath)}';
+  String get titleOrId => title.trim().isEmpty ? id : _clip(title.trim(), 80);
 
-  static SyncedSession? fromJson(Object? value) {
+  SyncedSession withFileContent(String content) {
+    return SyncedSession(
+      source: source,
+      id: id,
+      relativePath: relativePath,
+      fileContentBase64: content,
+      title: title,
+      summary: summary,
+      aiTitle: aiTitle,
+      aiSummary: aiSummary,
+      aiTags: aiTags,
+      category: category,
+      fileSha256: fileSha256,
+      contentBase64Length: content.length,
+    );
+  }
+
+  static SyncedSession? fromJson(Object? value, {bool requireContent = true}) {
     if (value is! Map) {
       return null;
     }
@@ -3286,12 +3873,13 @@ class SyncedSession {
     final id = _stringOrNull(value['sessionId']);
     final relativePath = _stringOrNull(value['relativePath']);
     final content = _stringOrNull(value['fileContentBase64']);
-    if (source == null ||
-        id == null ||
-        relativePath == null ||
-        content == null) {
+    if (source == null || id == null || relativePath == null) {
       return null;
     }
+    if (requireContent && content == null) {
+      return null;
+    }
+    final contentLength = _intValue(value['contentBase64Length']);
     final tagsValue = value['aiTags'];
     final tags = tagsValue is List
         ? tagsValue
@@ -3305,13 +3893,17 @@ class SyncedSession {
       source: source,
       id: id,
       relativePath: relativePath,
-      fileContentBase64: content,
+      fileContentBase64: content ?? '',
       title: _stringOrNull(value['title']) ?? '',
       summary: _stringOrNull(value['summary']) ?? '',
       aiTitle: _stringOrNull(value['aiTitle']) ?? '',
       aiSummary: _stringOrNull(value['aiSummary']) ?? '',
       aiTags: tags,
       category: _stringOrNull(value['category']) ?? '',
+      fileSha256: _stringOrNull(value['fileSha256']) ?? '',
+      contentBase64Length: contentLength > 0
+          ? contentLength
+          : (content?.length ?? 0),
     );
   }
 }

@@ -13,6 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
+DOWNLOAD_CHUNK_SIZE = 256 * 1024
+MAX_DOWNLOAD_CHUNK_SIZE = 512 * 1024
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
   account TEXT PRIMARY KEY,
@@ -182,33 +186,53 @@ class SyncStore:
                 """,
                 (account,),
             ).fetchall()
-        sessions = []
-        for row in rows:
-            try:
-                tags = json.loads(row["ai_tags"])
-            except Exception:
-                tags = []
-            sessions.append(
-                {
-                    "source": row["source"],
-                    "sessionId": row["session_id"],
-                    "relativePath": row["relative_path"],
-                    "cwd": row["cwd"],
-                    "title": row["title"],
-                    "summary": row["summary"],
-                    "aiTitle": row["ai_title"],
-                    "aiSummary": row["ai_summary"],
-                    "aiTags": tags if isinstance(tags, list) else [],
-                    "category": row["category"],
-                    "updatedAt": row["updated_at"],
-                    "messageCount": row["message_count"],
-                    "fileSha256": row["file_sha256"],
-                    "fileContentBase64": row["file_content_base64"],
-                    "deviceName": row["device_name"],
-                    "serverUpdatedAt": row["server_updated_at"],
-                }
-            )
-        return {"ok": True, "sessions": sessions}
+        return {"ok": True, "sessions": [session_payload(row, True) for row in rows]}
+
+    def download_list(self, account):
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE account = ?
+                ORDER BY server_updated_at DESC
+                """,
+                (account,),
+            ).fetchall()
+        return {"ok": True, "sessions": [session_payload(row, False) for row in rows]}
+
+    def download_chunk(self, account, item):
+        source = clean_text(item.get("source"))
+        session_id = clean_text(item.get("sessionId"))
+        relative_path = clean_relative_path(item.get("relativePath"))
+        offset = max(0, int_value(item.get("offset")))
+        length = int_value(item.get("length")) or DOWNLOAD_CHUNK_SIZE
+        length = max(1, min(length, MAX_DOWNLOAD_CHUNK_SIZE))
+        if source not in ("codex", "claude") or not session_id or not relative_path:
+            raise ValueError("invalid session identity")
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT file_content_base64, file_sha256 FROM sessions
+                WHERE account = ? AND source = ? AND session_id = ? AND relative_path = ?
+                """,
+                (account, source, session_id, relative_path),
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError("session not found")
+        content = row["file_content_base64"]
+        total_length = len(content)
+        if offset > total_length:
+            offset = total_length
+        next_offset = min(offset + length, total_length)
+        return {
+            "ok": True,
+            "chunkBase64": content[offset:next_offset],
+            "offset": offset,
+            "nextOffset": next_offset,
+            "totalLength": total_length,
+            "complete": next_offset >= total_length,
+            "fileSha256": row["file_sha256"],
+        }
 
     def upload_chunk(self, account, device_name, item):
         upload_id = clean_upload_id(item.get("uploadId"))
@@ -274,6 +298,34 @@ class SyncStore:
         return row is not None
 
 
+def session_payload(row, include_content):
+    try:
+        tags = json.loads(row["ai_tags"])
+    except Exception:
+        tags = []
+    payload = {
+        "source": row["source"],
+        "sessionId": row["session_id"],
+        "relativePath": row["relative_path"],
+        "cwd": row["cwd"],
+        "title": row["title"],
+        "summary": row["summary"],
+        "aiTitle": row["ai_title"],
+        "aiSummary": row["ai_summary"],
+        "aiTags": tags if isinstance(tags, list) else [],
+        "category": row["category"],
+        "updatedAt": row["updated_at"],
+        "messageCount": row["message_count"],
+        "fileSha256": row["file_sha256"],
+        "contentBase64Length": len(row["file_content_base64"]),
+        "deviceName": row["device_name"],
+        "serverUpdatedAt": row["server_updated_at"],
+    }
+    if include_content:
+        payload["fileContentBase64"] = row["file_content_base64"]
+    return payload
+
+
 class Handler(BaseHTTPRequestHandler):
     store = None
 
@@ -308,9 +360,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/download":
                 self.write_json(self.store.download(account))
                 return
+            if self.path == "/api/download-list":
+                self.write_json(self.store.download_list(account))
+                return
+            if self.path == "/api/download-chunk":
+                session = body.get("session")
+                if not isinstance(session, dict):
+                    raise ValueError("session must be an object")
+                self.write_json(self.store.download_chunk(account, session))
+                return
             self.write_json({"ok": False, "error": "not found"}, status=404)
         except PermissionError as exc:
             self.write_json({"ok": False, "error": str(exc)}, status=403)
+        except FileNotFoundError as exc:
+            self.write_json({"ok": False, "error": str(exc)}, status=404)
         except Exception as exc:
             self.write_json({"ok": False, "error": str(exc)}, status=400)
 
