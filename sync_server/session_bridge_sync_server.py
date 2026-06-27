@@ -100,6 +100,22 @@ class SyncStore:
                 (current, account),
             )
 
+    def provision_user(self, account, sync_key):
+        if not account or not sync_key:
+            raise ValueError("account and sync key are required")
+        current = now_iso()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO users(account, key_hash, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                  key_hash = excluded.key_hash,
+                  updated_at = excluded.updated_at
+                """,
+                (account, key_hash(sync_key), current, current),
+            )
+
     def upload(self, account, device_name, sessions):
         sent = 0
         updated = 0
@@ -454,8 +470,14 @@ def main():
         "--db",
         default="/opt/session-bridge-sync/session_bridge_sync.sqlite",
     )
+    parser.add_argument("--provision-account", default="")
+    parser.add_argument("--provision-key", default="")
     args = parser.parse_args()
     Handler.store = SyncStore(args.db)
+    if args.provision_account or args.provision_key:
+        Handler.store.provision_user(args.provision_account, args.provision_key)
+        print("provisioned sync account")
+        return
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.serve_forever()
 

@@ -313,14 +313,15 @@ class _SessionHomePageState extends State<SessionHomePage> {
   }
 
   Future<void> _restore(AgentSession session) async {
-    final command = await showDialog<String>(
+    final request = await showDialog<RestoreRequest>(
       context: context,
       builder: (context) => RestoreCommandDialog(session: session),
     );
-    if (command == null) {
+    if (request == null) {
       return;
     }
-    if (command.trim().isEmpty) {
+    if (request.target == RestoreTarget.powerShell &&
+        request.command.trim().isEmpty) {
       setState(() {
         _status = '恢复命令为空，已取消。';
       });
@@ -328,9 +329,14 @@ class _SessionHomePageState extends State<SessionHomePage> {
     }
 
     try {
-      await SessionLauncher.restore(session, command.trim());
+      await SessionLauncher.restore(session, request);
+      final status = switch (request.target) {
+        RestoreTarget.codexWin => '已在 Codex Win 中打开会话：${session.id}',
+        RestoreTarget.powerShell =>
+          '已打开 PowerShell 恢复窗口：${request.command.trim()}',
+      };
       setState(() {
-        _status = '已打开 PowerShell 恢复窗口：${command.trim()}';
+        _status = status;
       });
     } catch (error) {
       setState(() {
@@ -601,26 +607,64 @@ class _SessionHomePageState extends State<SessionHomePage> {
       await _showSettings();
       return;
     }
+    final client = SessionSyncClient(_settings);
     setState(() {
       _syncing = true;
-      _status = '正在下载同步数据...';
+      _status = '正在读取远端会话清单...';
     });
     try {
-      final result = await SessionSyncClient(_settings).download(
+      final remoteSessions = await client.downloadList();
+      if (!mounted) {
+        return;
+      }
+      if (remoteSessions.isEmpty) {
+        setState(() {
+          _syncing = false;
+          _status = '远端没有可下载的会话。';
+        });
+        return;
+      }
+      setState(() {
+        _syncing = false;
+        _status = '已读取远端 ${remoteSessions.length} 个会话，请选择下载方式。';
+      });
+      final choice = await showDialog<DownloadSyncChoice>(
+        context: context,
+        builder: (context) => DownloadSyncDialog(sessions: remoteSessions),
+      );
+      if (!mounted) {
+        return;
+      }
+      if (choice == null || choice.sessions.isEmpty) {
+        setState(() {
+          _status = '已取消下载同步。';
+        });
+        return;
+      }
+      final modeLabel = choice.full ? '全量下载同步' : '指定会话恢复';
+      setState(() {
+        _syncing = true;
+        _status = '正在准备$modeLabel...';
+      });
+      final result = await client.downloadSessions(
+        choice.sessions,
         onProgress: (done, total, session, {chunkIndex, chunkTotal}) {
+          if (!mounted) {
+            return;
+          }
           setState(() {
             if (chunkIndex != null && chunkTotal != null) {
               _status =
-                  '正在下载同步数据：${done + 1}/$total ${session.titleOrId}（分块 $chunkIndex/$chunkTotal）';
+                  '正在$modeLabel：${done + 1}/$total ${session.titleOrId}（分块 $chunkIndex/$chunkTotal）';
             } else {
-              _status = '正在下载同步数据：$done/$total ${session.titleOrId}';
+              _status = '正在$modeLabel：$done/$total ${session.titleOrId}';
             }
           });
         },
       );
       final applyResult = await _applyDownloadedSessions(result.sessions);
       final status =
-          '下载同步完成：远端 ${result.sessions.length} 个，写入 ${applyResult.written} 个，跳过 ${applyResult.skipped} 个。';
+          '$modeLabel完成：选择 ${result.sessions.length} 个，写入 ${applyResult.written} 个，跳过 ${applyResult.skipped} 个。';
       await _load();
       setState(() {
         _syncing = false;
@@ -1818,8 +1862,15 @@ class SessionDetail extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 16),
-          _SectionTitle(icon: Icons.terminal, text: '恢复命令'),
+          _SectionTitle(icon: Icons.terminal, text: '恢复方式'),
           const SizedBox(height: 8),
+          if (current.source == SessionSource.codex) ...[
+            SelectableText(
+              current.codexWinDeepLink,
+              style: const TextStyle(fontFamily: 'Consolas', fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+          ],
           SelectableText(
             current.restoreCommandPreview,
             style: const TextStyle(fontFamily: 'Consolas', fontSize: 13),
@@ -2052,6 +2103,222 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
+class DownloadSyncChoice {
+  const DownloadSyncChoice._(this.sessions, {required this.full});
+
+  factory DownloadSyncChoice.full(List<SyncedSession> sessions) {
+    return DownloadSyncChoice._(sessions, full: true);
+  }
+
+  factory DownloadSyncChoice.single(SyncedSession session) {
+    return DownloadSyncChoice._([session], full: false);
+  }
+
+  final List<SyncedSession> sessions;
+  final bool full;
+}
+
+class DownloadSyncDialog extends StatefulWidget {
+  const DownloadSyncDialog({super.key, required this.sessions});
+
+  final List<SyncedSession> sessions;
+
+  @override
+  State<DownloadSyncDialog> createState() => _DownloadSyncDialogState();
+}
+
+class _DownloadSyncDialogState extends State<DownloadSyncDialog> {
+  String _query = '';
+
+  List<SyncedSession> get _visibleSessions {
+    final needle = _query.trim().toLowerCase();
+    if (needle.isEmpty) {
+      return widget.sessions;
+    }
+    return widget.sessions
+        .where((session) {
+          final haystack = [
+            session.displayTitle,
+            session.displaySummary,
+            session.id,
+            session.relativePath,
+            session.cwd,
+            session.source.label,
+            session.category,
+          ].join('\n').toLowerCase();
+          return haystack.contains(needle);
+        })
+        .toList(growable: false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleSessions = _visibleSessions;
+    return AlertDialog(
+      title: const Text('选择下载同步'),
+      content: SizedBox(
+        width: 820,
+        height: 560,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '远端共 ${widget.sessions.length} 个会话。全量同步会逐个分块下载；也可以只恢复下面某一个会话。',
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: qmMuted, height: 1.4),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              onChanged: (value) => setState(() => _query = value),
+              decoration: const InputDecoration(
+                isDense: true,
+                prefixIcon: Icon(Icons.search),
+                hintText: '搜索远端会话、目录或分类',
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: visibleSessions.isEmpty
+                  ? const _EmptyState(
+                      icon: Icons.search_off_outlined,
+                      title: '没有匹配的远端会话',
+                      detail: '换一个关键词再试。',
+                    )
+                  : ListView.separated(
+                      itemCount: visibleSessions.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final session = visibleSessions[index];
+                        return _DownloadSessionListItem(
+                          session: session,
+                          onRestore: () => Navigator.of(
+                            context,
+                          ).pop(DownloadSyncChoice.single(session)),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.of(
+            context,
+          ).pop(DownloadSyncChoice.full(widget.sessions)),
+          icon: const Icon(Icons.cloud_download_outlined),
+          label: const Text('全量同步'),
+        ),
+      ],
+    );
+  }
+}
+
+class _DownloadSessionListItem extends StatelessWidget {
+  const _DownloadSessionListItem({
+    required this.session,
+    required this.onRestore,
+  });
+
+  final SyncedSession session;
+  final VoidCallback onRestore;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: qmSurfaceStrong,
+        border: Border.all(color: qmBorder),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SourceChip(source: session.source),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  session.displayTitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                if (session.displaySummary.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    session.displaySummary,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: qmMuted),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    InfoPill(
+                      icon: Icons.description_outlined,
+                      text: session.relativePath,
+                    ),
+                    InfoPill(
+                      icon: Icons.data_object_outlined,
+                      text: _formatBase64FileSize(session.contentBase64Length),
+                    ),
+                    if (session.messageCount > 0)
+                      InfoPill(
+                        icon: Icons.message_outlined,
+                        text: '${session.messageCount} 条消息',
+                      ),
+                    if (session.updatedAt.isNotEmpty)
+                      InfoPill(icon: Icons.schedule, text: session.updatedAt),
+                    if (session.category.isNotEmpty)
+                      CategoryChip(text: session.category),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          FilledButton.tonalIcon(
+            onPressed: onRestore,
+            icon: const Icon(Icons.restore_page_outlined),
+            label: const Text('恢复'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+enum RestoreTarget { codexWin, powerShell }
+
+class RestoreRequest {
+  const RestoreRequest({
+    required this.target,
+    this.command = '',
+    this.deepLink = '',
+  });
+
+  final RestoreTarget target;
+  final String command;
+  final String deepLink;
+}
+
 class RestoreCommandDialog extends StatefulWidget {
   const RestoreCommandDialog({super.key, required this.session});
 
@@ -2063,10 +2330,16 @@ class RestoreCommandDialog extends StatefulWidget {
 
 class _RestoreCommandDialogState extends State<RestoreCommandDialog> {
   late final TextEditingController _command;
+  late RestoreTarget _target;
+
+  bool get _canUseCodexWin => widget.session.source == SessionSource.codex;
 
   @override
   void initState() {
     super.initState();
+    _target = _canUseCodexWin
+        ? RestoreTarget.codexWin
+        : RestoreTarget.powerShell;
     _command = TextEditingController(
       text: widget.session.restoreCommandPreview,
     );
@@ -2081,7 +2354,7 @@ class _RestoreCommandDialogState extends State<RestoreCommandDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('确认恢复命令'),
+      title: const Text('选择恢复方式'),
       content: SizedBox(
         width: 760,
         child: Column(
@@ -2103,17 +2376,59 @@ class _RestoreCommandDialogState extends State<RestoreCommandDialog> {
               ],
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _command,
-              minLines: 5,
-              maxLines: 10,
-              style: const TextStyle(fontFamily: 'Consolas', fontSize: 13),
-              decoration: const InputDecoration(
-                labelText: '即将在 PowerShell 中执行的命令',
-                alignLabelWithHint: true,
-                border: OutlineInputBorder(),
-              ),
+            SegmentedButton<RestoreTarget>(
+              segments: [
+                ButtonSegment(
+                  value: RestoreTarget.codexWin,
+                  enabled: _canUseCodexWin,
+                  icon: const Icon(Icons.desktop_windows_outlined),
+                  label: const Text('Codex Win'),
+                ),
+                const ButtonSegment(
+                  value: RestoreTarget.powerShell,
+                  icon: Icon(Icons.terminal),
+                  label: Text('PowerShell'),
+                ),
+              ],
+              selected: {_target},
+              onSelectionChanged: (values) {
+                setState(() => _target = values.single);
+              },
             ),
+            const SizedBox(height: 12),
+            if (_target == RestoreTarget.codexWin)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '通过 Codex Win 官方深链打开本地线程，不修改 Codex Win 配置。'
+                    '应用会使用本地会话记录中的工作目录和上下文。',
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: qmMuted),
+                  ),
+                  const SizedBox(height: 10),
+                  SelectableText(
+                    widget.session.codexWinDeepLink,
+                    style: const TextStyle(
+                      fontFamily: 'Consolas',
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              )
+            else
+              TextField(
+                controller: _command,
+                minLines: 5,
+                maxLines: 10,
+                style: const TextStyle(fontFamily: 'Consolas', fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: '即将在 PowerShell 中执行的命令',
+                  alignLabelWithHint: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
           ],
         ),
       ),
@@ -2123,8 +2438,20 @@ class _RestoreCommandDialogState extends State<RestoreCommandDialog> {
           child: const Text('取消'),
         ),
         FilledButton.icon(
-          onPressed: () => Navigator.of(context).pop(_command.text),
-          icon: const Icon(Icons.terminal),
+          onPressed: () {
+            Navigator.of(context).pop(
+              RestoreRequest(
+                target: _target,
+                command: _command.text,
+                deepLink: widget.session.codexWinDeepLink,
+              ),
+            );
+          },
+          icon: Icon(
+            _target == RestoreTarget.codexWin
+                ? Icons.open_in_new
+                : Icons.terminal,
+          ),
           label: const Text('确认恢复'),
         ),
       ],
@@ -2239,7 +2566,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     setState(() => _claudeSkipPermissions = value),
               ),
               const Divider(height: 28),
-              _field(_syncServerUrl, '同步服务器 URL', Icons.cloud_outlined),
+              _field(
+                _syncServerUrl,
+                '同步服务器 URL',
+                Icons.cloud_outlined,
+                helperText:
+                    '填写同步服务的 HTTP 根地址，不是数据库地址；通常不要加 /api，数据库由服务端程序在服务器内部访问。',
+              ),
               const SizedBox(height: 12),
               _field(_syncAccount, '同步账号', Icons.person_outline),
               const SizedBox(height: 12),
@@ -2298,11 +2631,17 @@ class _SettingsDialogState extends State<SettingsDialog> {
     );
   }
 
-  Widget _field(TextEditingController controller, String label, IconData icon) {
+  Widget _field(
+    TextEditingController controller,
+    String label,
+    IconData icon, {
+    String? helperText,
+  }) {
     return TextField(
       controller: controller,
       decoration: InputDecoration(
         labelText: label,
+        helperText: helperText,
         prefixIcon: Icon(icon),
         border: const OutlineInputBorder(),
       ),
@@ -3149,6 +3488,10 @@ class AgentSession {
     return 'Set-Location -LiteralPath $quotedCwd; $command';
   }
 
+  String get codexWinDeepLink {
+    return Uri(scheme: 'codex', host: 'threads', path: '/$id').toString();
+  }
+
   String get promptContext {
     final buffer = StringBuffer()
       ..writeln('Source: ${source.label}')
@@ -3450,7 +3793,29 @@ class SessionRepository {
 class SessionLauncher {
   const SessionLauncher._();
 
-  static Future<void> restore(AgentSession session, String command) async {
+  static Future<void> restore(AgentSession session, RestoreRequest request) {
+    return switch (request.target) {
+      RestoreTarget.codexWin => openCodexWin(session),
+      RestoreTarget.powerShell => openPowerShell(session, request.command),
+    };
+  }
+
+  static Future<void> openCodexWin(AgentSession session) async {
+    if (session.source != SessionSource.codex) {
+      throw StateError('Codex Win 只能打开 Codex 会话。');
+    }
+    await Process.start('cmd.exe', [
+      '/c',
+      'start',
+      '',
+      session.codexWinDeepLink,
+    ], mode: ProcessStartMode.detached);
+  }
+
+  static Future<void> openPowerShell(
+    AgentSession session,
+    String command,
+  ) async {
     final cwd = session.cwd.isEmpty ? _homeDir : session.cwd;
     await Process.start(
       'cmd.exe',
@@ -3607,17 +3972,21 @@ class SessionSyncClient {
   Future<SyncDownloadResult> download({
     SyncDownloadProgress? onProgress,
   }) async {
-    Map<String, dynamic> decoded;
     try {
-      decoded = await _postJson('/api/download-list', const {});
+      final metadata = await downloadList();
+      return downloadSessions(metadata, onProgress: onProgress);
     } catch (error) {
       if (!_shouldUseLegacyDownload(error)) {
         rethrow;
       }
       return _downloadLegacy(onProgress: onProgress);
     }
+  }
+
+  Future<List<SyncedSession>> downloadList() async {
+    final decoded = await _postJson('/api/download-list', const {});
     final rawSessions = decoded['sessions'];
-    final metadata = rawSessions is List
+    return rawSessions is List
         ? rawSessions
               .map(
                 (value) => SyncedSession.fromJson(value, requireContent: false),
@@ -3625,17 +3994,21 @@ class SessionSyncClient {
               .whereType<SyncedSession>()
               .toList()
         : <SyncedSession>[];
+  }
+
+  Future<SyncDownloadResult> downloadSessions(
+    List<SyncedSession> metadata, {
+    SyncDownloadProgress? onProgress,
+  }) async {
     final sessions = <SyncedSession>[];
     final total = metadata.length;
     for (var index = 0; index < total; index++) {
       final session = metadata[index];
-      final content = await _downloadSessionContent(
-        session,
-        index,
-        total,
-        onProgress,
-      );
-      final completed = session.withFileContent(content);
+      final completed = session.fileContentBase64.isNotEmpty
+          ? session
+          : session.withFileContent(
+              await _downloadSessionContent(session, index, total, onProgress),
+            );
       sessions.add(completed);
       onProgress?.call(index + 1, total, completed);
     }
@@ -3817,12 +4190,15 @@ class SyncedSession {
     required this.id,
     required this.relativePath,
     this.fileContentBase64 = '',
+    this.cwd = '',
     required this.title,
     required this.summary,
     required this.aiTitle,
     required this.aiSummary,
     required this.aiTags,
     required this.category,
+    this.updatedAt = '',
+    this.messageCount = 0,
     this.fileSha256 = '',
     this.contentBase64Length = 0,
   });
@@ -3831,17 +4207,29 @@ class SyncedSession {
   final String id;
   final String relativePath;
   final String fileContentBase64;
+  final String cwd;
   final String title;
   final String summary;
   final String aiTitle;
   final String aiSummary;
   final List<String> aiTags;
   final String category;
+  final String updatedAt;
+  final int messageCount;
   final String fileSha256;
   final int contentBase64Length;
 
   String get key => '${source.name}:$id:${_joinPath('', relativePath)}';
-  String get titleOrId => title.trim().isEmpty ? id : _clip(title.trim(), 80);
+  String get displayTitle {
+    final text = (aiTitle.isNotEmpty ? aiTitle : title).trim();
+    return text.isEmpty ? id : _clip(text, 120);
+  }
+
+  String get displaySummary {
+    return _clip((aiSummary.isNotEmpty ? aiSummary : summary).trim(), 360);
+  }
+
+  String get titleOrId => _clip(displayTitle, 80);
 
   SyncedSession withFileContent(String content) {
     return SyncedSession(
@@ -3849,12 +4237,15 @@ class SyncedSession {
       id: id,
       relativePath: relativePath,
       fileContentBase64: content,
+      cwd: cwd,
       title: title,
       summary: summary,
       aiTitle: aiTitle,
       aiSummary: aiSummary,
       aiTags: aiTags,
       category: category,
+      updatedAt: updatedAt,
+      messageCount: messageCount,
       fileSha256: fileSha256,
       contentBase64Length: content.length,
     );
@@ -3894,12 +4285,15 @@ class SyncedSession {
       id: id,
       relativePath: relativePath,
       fileContentBase64: content ?? '',
+      cwd: _stringOrNull(value['cwd']) ?? '',
       title: _stringOrNull(value['title']) ?? '',
       summary: _stringOrNull(value['summary']) ?? '',
       aiTitle: _stringOrNull(value['aiTitle']) ?? '',
       aiSummary: _stringOrNull(value['aiSummary']) ?? '',
       aiTags: tags,
       category: _stringOrNull(value['category']) ?? '',
+      updatedAt: _stringOrNull(value['updatedAt']) ?? '',
+      messageCount: _intValue(value['messageCount']),
       fileSha256: _stringOrNull(value['fileSha256']) ?? '',
       contentBase64Length: contentLength > 0
           ? contentLength
@@ -4611,6 +5005,28 @@ String _timestampForFile(DateTime dateTime) {
   String two(int value) => value.toString().padLeft(2, '0');
   return '${dateTime.year}${two(dateTime.month)}${two(dateTime.day)}_'
       '${two(dateTime.hour)}${two(dateTime.minute)}${two(dateTime.second)}';
+}
+
+String _formatBase64FileSize(int base64Length) {
+  if (base64Length <= 0) {
+    return '大小未知';
+  }
+  final bytes = (base64Length * 3 / 4).round();
+  return _formatBytes(bytes);
+}
+
+String _formatBytes(int bytes) {
+  const units = ['B', 'KB', 'MB', 'GB'];
+  var size = bytes.toDouble();
+  var unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  if (unitIndex == 0) {
+    return '${size.round()} ${units[unitIndex]}';
+  }
+  return '${size.toStringAsFixed(size >= 10 ? 1 : 2)} ${units[unitIndex]}';
 }
 
 String? _uuidFromPath(String path) {

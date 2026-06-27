@@ -13,7 +13,9 @@ void main() {
     expect(find.text('codex'), findsOneWidget);
   });
 
-  testWidgets('restore dialog shows editable command', (tester) async {
+  testWidgets('restore dialog can open Codex Win or editable command', (
+    tester,
+  ) async {
     final session = AgentSession(
       source: SessionSource.codex,
       id: '019e2e86-c4a4-7203-b1a6-880ba0785a43',
@@ -30,13 +32,53 @@ void main() {
       SessionBridgeAppForTest(child: RestoreCommandDialog(session: session)),
     );
 
-    expect(find.text('确认恢复命令'), findsOneWidget);
+    expect(find.text('选择恢复方式'), findsOneWidget);
+    expect(find.text('Codex Win'), findsOneWidget);
+    expect(find.textContaining('codex://threads/019e2e86'), findsOneWidget);
+
+    await tester.tap(find.text('PowerShell'));
+    await tester.pumpAndSettle();
+
     expect(find.textContaining('codex resume'), findsOneWidget);
 
     await tester.enterText(find.byType(EditableText).first, 'custom command');
     await tester.pump();
 
     expect(find.text('custom command'), findsOneWidget);
+  });
+
+  testWidgets('claude restore dialog uses PowerShell only', (tester) async {
+    final session = AgentSession(
+      source: SessionSource.claude,
+      id: 'claude-session',
+      filePath: r'C:\Users\Administrator\.claude\projects\sample.jsonl',
+      cwd: r'H:\desk\app6',
+      title: 'Claude session',
+      summary: 'Sample summary',
+      updatedAt: DateTime(2026, 5, 25, 10, 0),
+      messageCount: 1,
+      turns: const [ChatTurn(role: 'user', text: 'test')],
+    );
+
+    await tester.pumpWidget(
+      SessionBridgeAppForTest(child: RestoreCommandDialog(session: session)),
+    );
+
+    expect(find.text('选择恢复方式'), findsOneWidget);
+    expect(find.text('PowerShell'), findsOneWidget);
+    expect(find.textContaining('claude --resume'), findsOneWidget);
+    expect(find.textContaining('codex://threads/'), findsNothing);
+  });
+
+  testWidgets('settings dialog explains sync server URL', (tester) async {
+    await tester.pumpWidget(
+      SessionBridgeAppForTest(
+        child: SettingsDialog(settings: AppSettings.defaults()),
+      ),
+    );
+
+    expect(find.text('同步服务器 URL'), findsOneWidget);
+    expect(find.textContaining('不是数据库地址'), findsOneWidget);
   });
 
   test('extracts AI message from OpenAI content blocks', () {
@@ -109,6 +151,88 @@ void main() {
     expect(session.category, '开发');
   });
 
+  test('builds Codex Win deep link', () {
+    final session = sampleSession(
+      id: '019e2e86-c4a4-7203-b1a6-880ba0785a43',
+      title: 'Sample',
+    );
+
+    expect(
+      session.codexWinDeepLink,
+      'codex://threads/019e2e86-c4a4-7203-b1a6-880ba0785a43',
+    );
+  });
+
+  test('parses synced session metadata without file content', () {
+    final session = SyncedSession.fromJson({
+      'source': 'claude',
+      'sessionId': 'remote-1',
+      'relativePath': r'project\remote-1.jsonl',
+      'cwd': r'H:\desk',
+      'title': 'Remote session',
+      'summary': 'Remote summary',
+      'updatedAt': '2026-06-05T12:00:00Z',
+      'messageCount': 7,
+      'contentBase64Length': 4096,
+    }, requireContent: false);
+
+    expect(session, isNotNull);
+    expect(session!.source, SessionSource.claude);
+    expect(session.displayTitle, 'Remote session');
+    expect(session.cwd, r'H:\desk');
+    expect(session.messageCount, 7);
+    expect(session.contentBase64Length, 4096);
+    expect(session.fileContentBase64, isEmpty);
+  });
+
+  testWidgets('download dialog can choose a single session', (tester) async {
+    final sessions = [
+      sampleSyncedSession(id: 'one'),
+      sampleSyncedSession(id: 'two'),
+    ];
+    DownloadSyncChoice? selected;
+    await tester.pumpWidget(
+      SessionBridgeAppForTest(
+        child: DownloadDialogTestHost(
+          sessions: sessions,
+          onChoice: (value) => selected = value,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, '恢复').first);
+    await tester.pumpAndSettle();
+
+    expect(selected, isNotNull);
+    expect(selected!.full, isFalse);
+    expect(selected!.sessions.single.id, 'one');
+  });
+
+  testWidgets('download dialog can choose full sync', (tester) async {
+    final sessions = [
+      sampleSyncedSession(id: 'one'),
+      sampleSyncedSession(id: 'two'),
+    ];
+    DownloadSyncChoice? selected;
+    await tester.pumpWidget(
+      SessionBridgeAppForTest(
+        child: DownloadDialogTestHost(
+          sessions: sessions,
+          onChoice: (value) => selected = value,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.widgetWithText(FilledButton, '全量同步'));
+    await tester.pumpAndSettle();
+
+    expect(selected, isNotNull);
+    expect(selected!.full, isTrue);
+    expect(selected!.sessions, hasLength(2));
+  });
+
   test('parses AI category plan and fills missing sessions', () {
     final sessions = [
       sampleSession(id: 'a', title: 'Flutter Android player'),
@@ -158,6 +282,39 @@ class SessionBridgeAppForTest extends StatelessWidget {
   }
 }
 
+class DownloadDialogTestHost extends StatefulWidget {
+  const DownloadDialogTestHost({
+    super.key,
+    required this.sessions,
+    required this.onChoice,
+  });
+
+  final List<SyncedSession> sessions;
+  final ValueChanged<DownloadSyncChoice?> onChoice;
+
+  @override
+  State<DownloadDialogTestHost> createState() => _DownloadDialogTestHostState();
+}
+
+class _DownloadDialogTestHostState extends State<DownloadDialogTestHost> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final choice = await showDialog<DownloadSyncChoice>(
+        context: context,
+        builder: (context) => DownloadSyncDialog(sessions: widget.sessions),
+      );
+      widget.onChoice(choice);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const SizedBox.shrink();
+  }
+}
+
 AgentSession sampleSession({required String id, required String title}) {
   return AgentSession(
     source: SessionSource.codex,
@@ -169,5 +326,22 @@ AgentSession sampleSession({required String id, required String title}) {
     updatedAt: DateTime(2026, 6, 5, 10, 0),
     messageCount: 1,
     turns: const [ChatTurn(role: 'user', text: 'sample task')],
+  );
+}
+
+SyncedSession sampleSyncedSession({required String id}) {
+  return SyncedSession(
+    source: SessionSource.codex,
+    id: id,
+    relativePath: 'sessions\\$id.jsonl',
+    title: 'Remote $id',
+    summary: 'Remote summary $id',
+    aiTitle: '',
+    aiSummary: '',
+    aiTags: const [],
+    category: '测试/无效/其它',
+    updatedAt: '2026-06-05T12:00:00Z',
+    messageCount: 3,
+    contentBase64Length: 4096,
   );
 }
